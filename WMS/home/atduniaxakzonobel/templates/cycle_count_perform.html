@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Cycle Count - Enter Count Data</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            background-color: #C7C7C7;
+            color: #212529;
+        }
+
+        .navbar {
+            background-color: #343a40;
+            padding: 15px;
+        }
+
+        .navbar-brand {
+            font-weight: bold;
+            color: #fff;
+            font-size: 1.5rem;
+        }
+
+        .container {
+            max-width: 1400px;
+            padding-top: 40px;
+        }
+
+        .card {
+            margin-bottom: 15px;
+        }
+
+        .card-header {
+            background-color: #007bff;
+            color: white;
+            font-weight: bold;
+        }
+
+        .table-responsive {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .btn-update {
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            z-index: 1000;
+            padding: 15px 30px;
+            font-size: 1.2rem;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        }
+
+        .count-input {
+            width: 100px;
+        }
+
+        .difference {
+            font-weight: bold;
+        }
+
+        .difference.positive {
+            color: green;
+        }
+
+        .difference.negative {
+            color: red;
+        }
+
+        .stock-row {
+            background-color: #f9f9f9;
+        }
+
+        .stock-row:hover {
+            background-color: #e9ecef;
+        }
+
+        .summary-card {
+            position: sticky;
+            top: 20px;
+            z-index: 100;
+        }
+
+        .filter-section {
+            background-color: white;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+<body>
+
+<!-- Navbar -->
+<nav class="navbar navbar-expand-lg navbar-dark">
+    <div class="container-fluid">
+        <a class="navbar-brand" href="/">Cycle Count - Enter Data</a>
+        <div class="navbar-nav ms-auto">
+            <a class="btn btn-outline-light me-2" href="/cycle-count?include_zero={{ include_zero }}&racking_number={{ selected_racking }}">📋 Print View</a>
+            <a class="btn btn-outline-light" href="/dashboard">← Dashboard</a>
+        </div>
+    </div>
+</nav>
+
+<div class="container mt-4">
+    <!-- Filter Options -->
+    <div class="filter-section">
+        <h4>🔍 Cycle Count Filters</h4>
+        <form method="GET" action="/cycle-count/perform" class="row g-3 align-items-end">
+            <div class="col-md-3">
+                <label for="racking_number" class="form-label"><strong>Racking Number:</strong></label>
+                <select name="racking_number" id="racking_number" class="form-select">
+                    <option value="all" {% if selected_racking == 'all' %}selected{% endif %}>All Racking</option>
+                    {% for racking in racking_list %}
+                    <option value="{{ racking }}" {% if selected_racking == racking %}selected{% endif %}>{{ racking }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-3">
+                <label for="include_zero" class="form-label"><strong>Zero Stock Items:</strong></label>
+                <select name="include_zero" id="include_zero" class="form-select">
+                    <option value="yes" {% if include_zero == 'yes' %}selected{% endif %}>Include</option>
+                    <option value="no" {% if include_zero == 'no' %}selected{% endif %}>Exclude</option>
+                </select>
+            </div>
+            <div class="col-md-3">
+                <button type="submit" class="btn btn-primary w-100">📊 Apply Filters</button>
+            </div>
+            <div class="col-md-3 text-end">
+                <div class="d-inline-block">
+                    <span class="badge bg-primary me-2">Total Items: <span id="total-items">0</span></span>
+                    <span class="badge bg-success me-2">Updated: <span id="updated-count">0</span></span>
+                    <span class="badge bg-warning">Pending: <span id="pending-count">0</span></span>
+                </div>
+            </div>
+        </form>
+        {% if selected_racking != 'all' %}
+        <div class="alert alert-info mt-3 mb-0">
+            <strong>📍 Counting Racking:</strong> {{ selected_racking }}
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- Flash Messages -->
+    <div id="alert-container"></div>
+
+    <!-- Cycle Count Form -->
+    <form id="cycle-count-form">
+        {% for material_number, stocks in sku_stocks.items() %}
+        <div class="card mb-3">
+            <div class="card-header">
+                <div class="row">
+                    <div class="col-md-4">
+                        <strong>Material:</strong> {{ material_number }}
+                    </div>
+                    <div class="col-md-8">
+                        <strong>Description:</strong> {{ stocks[0].product_description }}
+                    </div>
+                </div>
+            </div>
+            <div class="card-body p-0">
+                <div class="table-responsive">
+                    <table class="table table-sm table-hover mb-0">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Batch Number</th>
+                                <th>Shipment Number</th>
+                                <th>Racking Number</th>
+                                <th>System Qty</th>
+                                <th>Counted Qty</th>
+                                <th>Difference</th>
+                                <th>Remarks</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for stock in stocks %}
+                            {% if stock.stock_id %}
+                            <tr class="stock-row" data-stock-id="{{ stock.stock_id }}" data-system-qty="{{ stock.quantity }}">
+                                <td>{{ stock.batch_number or 'N/A' }}</td>
+                                <td>{{ stock.shipment_number or 'N/A' }}</td>
+                                <td>{{ stock.racking_number or 'N/A' }}</td>
+                                <td class="system-qty">{{ stock.quantity }}</td>
+                                <td>
+                                    <input type="number" 
+                                           class="form-control form-control-sm count-input" 
+                                           name="count_{{ stock.stock_id }}" 
+                                           min="0" 
+                                           placeholder="Enter count"
+                                           data-stock-id="{{ stock.stock_id }}">
+                                </td>
+                                <td class="difference" data-stock-id="{{ stock.stock_id }}">-</td>
+                                <td><small>{{ stock.remarks or '' }}</small></td>
+                            </tr>
+                            {% endif %}
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+        {% else %}
+        <div class="alert alert-info">
+            No stock items found. {% if include_zero == 'no' %}<a href="/cycle-count/perform?include_zero=yes">Show zero stock items</a>{% endif %}
+        </div>
+        {% endfor %}
+    </form>
+
+    <!-- Update Button (Fixed) -->
+    <button type="button" id="submit-btn" class="btn btn-success btn-update" disabled>
+        💾 Submit Cycle Count
+    </button>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+    let totalItems = 0;
+    let updatedItems = 0;
+
+    // Calculate difference as user types
+    document.querySelectorAll('.count-input').forEach(input => {
+        totalItems++;
+        
+        input.addEventListener('input', function() {
+            const stockId = this.dataset.stockId;
+            const systemQty = parseInt(this.closest('tr').dataset.systemQty);
+            const countedQty = parseInt(this.value) || 0;
+            const difference = countedQty - systemQty;
+            
+            // Update difference cell
+            const diffCell = document.querySelector(`.difference[data-stock-id="${stockId}"]`);
+            if (this.value !== '') {
+                diffCell.textContent = difference >= 0 ? `+${difference}` : difference;
+                diffCell.className = 'difference ' + (difference > 0 ? 'positive' : difference < 0 ? 'negative' : '');
+                this.closest('tr').classList.add('table-warning');
+            } else {
+                diffCell.textContent = '-';
+                diffCell.className = 'difference';
+                this.closest('tr').classList.remove('table-warning');
+            }
+            
+            updateSummary();
+        });
+    });
+
+    function updateSummary() {
+        updatedItems = document.querySelectorAll('.count-input').length;
+        const filledInputs = Array.from(document.querySelectorAll('.count-input')).filter(input => input.value !== '').length;
+        const pending = updatedItems - filledInputs;
+        
+        document.getElementById('total-items').textContent = totalItems;
+        document.getElementById('updated-count').textContent = filledInputs;
+        document.getElementById('pending-count').textContent = pending;
+        
+        // Enable submit button if at least one field is filled
+        document.getElementById('submit-btn').disabled = filledInputs === 0;
+    }
+
+    // Submit cycle count
+    document.getElementById('submit-btn').addEventListener('click', function() {
+        const updates = [];
+        
+        document.querySelectorAll('.count-input').forEach(input => {
+            if (input.value !== '') {
+                updates.push({
+                    stock_id: input.dataset.stockId,
+                    counted_qty: parseInt(input.value)
+                });
+            }
+        });
+        
+        if (updates.length === 0) {
+            showAlert('Please enter at least one count.', 'warning');
+            return;
+        }
+        
+        if (!confirm(`Are you sure you want to update ${updates.length} stock item(s)? This will overwrite the current quantities.`)) {
+            return;
+        }
+        
+        // Disable button during submission
+        this.disabled = true;
+        this.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Submitting...';
+        
+        fetch('/cycle-count/update', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ updates: updates })
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                showAlert(`Successfully updated ${data.updated_count} stock item(s)!`, 'success');
+                
+                // Show adjustments summary
+                if (data.adjustments && data.adjustments.length > 0) {
+                    let summary = '<strong>Adjustments Made:</strong><ul>';
+                    data.adjustments.forEach(adj => {
+                        summary += `<li>${adj.material_number} - ${adj.product_description}<br>`;
+                        summary += `Batch: ${adj.batch_number} | ${adj.old_qty} → ${adj.new_qty} (${adj.difference >= 0 ? '+' : ''}${adj.difference})</li>`;
+                    });
+                    summary += '</ul>';
+                    showAlert(summary, 'info', false);
+                }
+                
+                // Reload page after 3 seconds
+                setTimeout(() => {
+                    window.location.reload();
+                }, 3000);
+            } else {
+                showAlert('Error: ' + data.error, 'danger');
+                this.disabled = false;
+                this.innerHTML = '💾 Submit Cycle Count';
+            }
+        })
+        .catch(error => {
+            showAlert('Error submitting cycle count: ' + error, 'danger');
+            this.disabled = false;
+            this.innerHTML = '💾 Submit Cycle Count';
+        });
+    });
+
+    function showAlert(message, type = 'info', autoClose = true) {
+        const alertContainer = document.getElementById('alert-container');
+        const alertDiv = document.createElement('div');
+        alertDiv.className = `alert alert-${type} alert-dismissible fade show`;
+        alertDiv.innerHTML = `
+            ${message}
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        `;
+        alertContainer.appendChild(alertDiv);
+        
+        if (autoClose) {
+            setTimeout(() => {
+                alertDiv.remove();
+            }, 5000);
+        }
+    }
+
+    // Initialize summary
+    updateSummary();
+</script>
+
+</body>
+</html>
