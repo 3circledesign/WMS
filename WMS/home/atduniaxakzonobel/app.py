@@ -762,44 +762,33 @@ def get_pack_sizes():
 @app.route('/search-sku', methods=['POST'])
 @login_required
 def search_sku():
-    data = request.get_json(silent=True) or {}
-    q = (data.get('q') or '').strip()
-    if not q:
-        return jsonify({'error': 'Query is required'}), 400
+    """Search SKU by material number OR product description"""
+    try:
+        data = request.get_json()
+        search_term = (data.get('search_term') or '').strip()
 
-    like = f"%{q}%"
-    # Adjust model/field names to your schema
-    skus = (SKU.query
-                .filter(or_(
-                    func.lower(SKU.material_number).like(func.lower(like)),
-                    func.lower(SKU.product_description).like(func.lower(like))
-                ))
-                .order_by(SKU.material_number.asc())
-                .limit(10)
-                .all())
+        if not search_term:
+            return jsonify({'results': []}), 200
 
-    if not skus:
-        return jsonify({'error': 'No matches found'}), 404
+        # Search by material_number OR product_description (case-insensitive)
+        # Also filter for SKUs that have stock available
+        skus = db.session.query(SKU).join(Stock).filter(
+            (SKU.material_number.like(f'%{search_term}%')) |
+            (SKU.product_description.like(f'%{search_term}%'))
+        ).filter(Stock.quantity > 0).distinct().limit(10).all()
 
-    # If exactly one, you can shortcut to the "single" shape used by /search-sku
-    if len(skus) == 1:
-        s = skus[0]
-        return jsonify({
-            'material_number': s.material_number,
-            'product_description': s.product_description
-            # include more fields if your front-end needs them
-        }), 200
+        results = []
+        for sku in skus:
+            results.append({
+                'material_number': sku.material_number,
+                'product_description': sku.product_description,
+                'display': f"{sku.material_number} - {sku.product_description}"
+            })
 
-    # Otherwise return a list of matches for the picker
-    matches = []
-    for s in skus:
-        matches.append({
-            'material_number': s.material_number,
-            'product_description': s.product_description,
-            # optional: example_shipment if you want to display something extra
-            'example_shipment': None
-        })
-    return jsonify({'matches': matches}), 200
+        return jsonify({'results': results}), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 # Route to view all stock items
 @app.route('/stocks', methods=['GET'])
@@ -1931,13 +1920,25 @@ def reset_password(username):
 
     return render_template('reset_password.html', username=username)
 
+
 @app.route('/get-sku-info', methods=['POST'])
+@login_required
 def get_sku_info():
     data = request.get_json()
     material_number = data.get('material_number')
 
-    # Fetch SKU based on material number
-    sku = SKU.query.filter_by(material_number=material_number).first()
+    # UPDATED: Search by material_number OR product_description
+    sku = SKU.query.filter(
+        (SKU.material_number == material_number) |
+        (SKU.product_description == material_number)
+    ).first()
+
+    # If not found by exact match, try partial match
+    if not sku:
+        sku = SKU.query.filter(
+            (SKU.material_number.like(f'%{material_number}%')) |
+            (SKU.product_description.like(f'%{material_number}%'))
+        ).first()
 
     if not sku:
         return jsonify({'error': 'SKU not found'}), 404
@@ -1974,8 +1975,9 @@ def get_sku_info():
     racking_numbers = list({r for batch in available_quantities.values() for r in batch.keys()})
     shipment_numbers = list(shipment_numbers)
 
-    # Return data
+    # Return data - INCLUDE material_number in response
     return jsonify({
+        'material_number': sku.material_number,  # ← ADDED
         'product_description': sku.product_description,
         'batch_numbers': batch_numbers,
         'racking_numbers': racking_numbers,
@@ -2023,18 +2025,21 @@ class CreateOrderForm(FlaskForm):
 def list_orders():
     # Get the search term from query parameters (default to empty string)
     search = request.args.get('search', '')
-
+ 
     # Get the current page number from query parameters (default to 1)
     page = request.args.get('page', 1, type=int)
-
-    # Create the base query filtering by DN number or customer name and ordering by most recent
+ 
+    # FIXED: Added sales_order to search filter
+    # Create the base query filtering by DN number, customer name, OR sales order
     query = Order.query.filter(
-        Order.dn_number.like(f"%{search}%") | Order.customer_name.like(f"%{search}%")
+        Order.dn_number.like(f"%{search}%") | 
+        Order.customer_name.like(f"%{search}%") |
+        Order.sales_order.like(f"%{search}%")  # ← ADDED THIS!
     ).order_by(Order.created_at.desc())  # Sort by most recent orders
-
-    # Paginate the results, 20 orders per page
+ 
+    # Paginate the results, 10 orders per page
     pagination = query.paginate(page=page, per_page=10, error_out=False)
-
+ 
     # Pass paginated orders and search term to the template
     return render_template('list_orders.html', orders=pagination.items, pagination=pagination, search=search)
 
@@ -3129,9 +3134,160 @@ def get_local_ip():
         s.close()
     return IP
 
+# Add this route to app.py (after the transfer_stock route)
+
+@app.route('/mass-transfer-rack', methods=['GET'])
+@login_required
+def mass_transfer_rack():
+    """Display page for mass transferring all items from one rack to another"""
+    # Get all racking numbers for dropdowns
+    all_rackings = Racking.query.order_by(Racking.racking_number).all()
+    racking_list = [r.racking_number for r in all_rackings]
+    
+    return render_template('mass_transfer_rack.html', racking_list=racking_list)
+
+
+@app.route('/get-rack-contents/<racking_number>', methods=['GET'])
+@login_required
+def get_rack_contents(racking_number):
+    """Get all stock items in a specific rack"""
+    try:
+        # Get all stock items in this rack with quantity > 0
+        stocks = Stock.query.filter_by(racking_number=racking_number).filter(Stock.quantity > 0).all()
+        
+        if not stocks:
+            return jsonify({'error': 'No items found in this rack'}), 404
+        
+        # Build response with stock details
+        items = []
+        total_quantity = 0
+        
+        for stock in stocks:
+            items.append({
+                'stock_id': stock.id,
+                'material_number': stock.sku.material_number,
+                'product_description': stock.sku.product_description,
+                'batch_number': stock.batch_number,
+                'shipment_number': stock.shipment_number or 'N/A',
+                'quantity': stock.quantity,
+                'remarks': stock.remarks or ''
+            })
+            total_quantity += stock.quantity
+        
+        return jsonify({
+            'success': True,
+            'items': items,
+            'total_quantity': total_quantity,
+            'item_count': len(items)
+        }), 200
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/execute-mass-transfer', methods=['POST'])
+@login_required
+def execute_mass_transfer():
+    """Transfer all items from source rack to destination rack"""
+    try:
+        data = request.get_json()
+        source_rack = data.get('source_rack')
+        dest_rack = data.get('dest_rack')
+        
+        if not source_rack or not dest_rack:
+            return jsonify({'error': 'Source and destination racks are required'}), 400
+        
+        if source_rack == dest_rack:
+            return jsonify({'error': 'Source and destination racks cannot be the same'}), 400
+        
+        # Verify destination rack exists
+        dest_racking = Racking.query.filter_by(racking_number=dest_rack).first()
+        if not dest_racking:
+            return jsonify({'error': 'Destination rack not found'}), 404
+        
+        # Get all stock items from source rack
+        stocks = Stock.query.filter_by(racking_number=source_rack).filter(Stock.quantity > 0).all()
+        
+        if not stocks:
+            return jsonify({'error': 'No items found in source rack'}), 404
+        
+        transfer_count = 0
+        total_quantity_transferred = 0
+        
+        # Transfer each stock item
+        for stock in stocks:
+            quantity = stock.quantity
+            
+            # Check if item with same details already exists in destination
+            existing_stock = Stock.query.filter_by(
+                sku_id=stock.sku_id,
+                batch_number=stock.batch_number,
+                shipment_number=stock.shipment_number,
+                racking_number=dest_rack,
+                remarks=stock.remarks
+            ).first()
+            
+            if existing_stock:
+                # Merge into existing stock
+                existing_stock.quantity += quantity
+                new_stock_id = existing_stock.id
+            else:
+                # Create new stock entry in destination rack
+                new_stock = Stock(
+                    sku_id=stock.sku_id,
+                    quantity=quantity,
+                    batch_number=stock.batch_number,
+                    shipment_number=stock.shipment_number,
+                    racking_number=dest_rack,
+                    remarks=stock.remarks
+                )
+                db.session.add(new_stock)
+                db.session.flush()
+                new_stock_id = new_stock.id
+            
+            # Create stock history for outgoing (from source)
+            history_out = StockHistory(
+                stock_id=stock.id,
+                change_type=f'Mass transfer to {dest_rack}',
+                quantity=-quantity,
+                username=current_user.username,
+                remarks=f'Mass transfer from {source_rack} to {dest_rack}'
+            )
+            db.session.add(history_out)
+            
+            # Create stock history for incoming (to destination)
+            history_in = StockHistory(
+                stock_id=new_stock_id,
+                change_type=f'Mass transfer from {source_rack}',
+                quantity=quantity,
+                username=current_user.username,
+                remarks=f'Mass transfer from {source_rack} to {dest_rack}'
+            )
+            db.session.add(history_in)
+            
+            # Remove stock from source (set quantity to 0 or delete)
+            db.session.delete(stock)  # Delete the source stock entry
+            
+            transfer_count += 1
+            total_quantity_transferred += quantity
+        
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': f'Successfully transferred {transfer_count} items ({total_quantity_transferred} total quantity) from {source_rack} to {dest_rack}',
+            'transfer_count': transfer_count,
+            'total_quantity': total_quantity_transferred
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': f'Error during mass transfer: {str(e)}'}), 500
+
 if __name__ == '__main__':
     from zeroconf import ServiceInfo, Zeroconf
     import socket
+    import random
     
     local_ip = get_local_ip()
     port = 5000
@@ -3139,9 +3295,10 @@ if __name__ == '__main__':
     # Initialize Zeroconf
     zeroconf = Zeroconf()
     
-    # Create service info
+    # Create UNIQUE service name with random ID to avoid conflicts
+    unique_id = random.randint(1000, 9999)
     service_type = "_http._tcp.local."
-    service_name = "WMS-Warehouse-Management._http._tcp.local."
+    service_name = f"WMS-Warehouse-Management-{unique_id}._http._tcp.local."
     
     service_info = ServiceInfo(
         service_type,
@@ -3152,7 +3309,7 @@ if __name__ == '__main__':
         server="wms-server.local."
     )
     
-    # Register the service
+    # Register the service with error handling
     print("\n" + "="*60)
     print("🚀 WMS Flask Server Starting...")
     print("="*60)
@@ -3161,17 +3318,27 @@ if __name__ == '__main__':
     print(f"   • Network: http://{local_ip}:{port}")
     print(f"   • mDNS:    http://wms-server.local:{port}")
     print("="*60)
-    print("📢 Broadcasting service on network...")
-    print("   Other computers can auto-discover this server!")
+    
+    try:
+        print("📢 Broadcasting service on network...")
+        zeroconf.register_service(service_info)
+        print(f"   ✅ Service registered as: {service_name}")
+        print("   Other computers can auto-discover this server!")
+    except Exception as e:
+        print(f"   ⚠️  Could not register mDNS service: {e}")
+        print("   Server will still work, but won't auto-discover on network.")
+    
     print("="*60 + "\n")
     
     try:
-        zeroconf.register_service(service_info)
         app.run(host='0.0.0.0', port=port, debug=True)
     except KeyboardInterrupt:
         print("\n\n🛑 Shutting down server...")
     finally:
         print("📢 Unregistering service...")
-        zeroconf.unregister_service(service_info)
+        try:
+            zeroconf.unregister_service(service_info)
+        except:
+            pass
         zeroconf.close()
         print("✅ Server stopped gracefully\n")

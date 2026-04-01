@@ -68,6 +68,70 @@
                 font-size: 1.75rem;
             }
         }
+        .autocomplete-results {
+            position: absolute;
+            background: white;
+            border: 1px solid #ccc;
+            border-top: none;
+            border-radius: 0 0 5px 5px;
+            max-height: 300px;
+            overflow-y: auto;
+            z-index: 1000;
+            width: calc(100% - 30px);
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            display: none;
+        }
+
+        .autocomplete-results.show {
+            display: block;
+        }
+
+        .autocomplete-item {
+            padding: 10px 15px;
+            cursor: pointer;
+            border-bottom: 1px solid #f0f0f0;
+            transition: background-color 0.2s;
+        }
+
+        .autocomplete-item:hover,
+        .autocomplete-item.active {
+            background-color: #007bff;
+            color: white;
+        }
+
+        .autocomplete-item .material-number {
+            font-weight: bold;
+            color: #007bff;
+        }
+
+        .autocomplete-item:hover .material-number,
+        .autocomplete-item.active .material-number {
+            color: white;
+        }
+
+        .autocomplete-item .product-desc {
+            font-size: 0.9em;
+            color: #666;
+        }
+
+        .autocomplete-item:hover .product-desc,
+        .autocomplete-item.active .product-desc {
+            color: #f0f0f0;
+        }
+
+        .no-results {
+            padding: 10px 15px;
+            color: #999;
+            font-style: italic;
+        }
+
+        /* Loading indicator */
+        #material_number.is-loading {
+            background-image: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 50 50"><circle cx="25" cy="25" r="20" fill="none" stroke="%23007bff" stroke-width="4"><animate attributeName="stroke-dasharray" dur="1.5s" repeatCount="indefinite" values="1,200;100,200;100,200"/><animate attributeName="stroke-dashoffset" dur="1.5s" repeatCount="indefinite" values="0;-15;-125"/></circle></svg>');
+            background-repeat: no-repeat;
+            background-position: right 10px center;
+            background-size: 20px 20px;
+        }
     </style>
 </head>
 
@@ -134,8 +198,11 @@
             <h4>Order Items</h4>
             <div class="row mb-3">
                 <div class="col-md-4 form-group">
-                    <label for="material_number" class="form-label">Material Number</label>
-                    <input type="text" id="material_number" class="form-control" placeholder="Enter Material Number">
+                    <label for="material_number" class="form-label">Material Number / Product Description</label>
+                    <input type="text" id="material_number" class="form-control"
+                           placeholder="Search by material number or product name..."
+                           autocomplete="off">
+                    <div id="autocomplete_results" class="autocomplete-results"></div>
                     <div class="invalid-feedback">Material Number is required.</div>
                 </div>
                 <div class="col-md-4 form-group">
@@ -845,6 +912,217 @@ function fetchSkuInfo(materialNumber){
   if (initial) fetchSkuInfo(initial);
 })();
 });
+
+        let autocompleteResults = [];
+let selectedIndex = -1;
+
+// Debounce helper
+function debounce(fn, wait) {
+    let t;
+    return (...args) => {
+        clearTimeout(t);
+        t = setTimeout(() => fn(...args), wait);
+    };
+}
+
+// Search SKU by material number or product description
+function searchSku(searchTerm) {
+    if (!searchTerm || searchTerm.length < 2) {
+        $('#autocomplete_results').removeClass('show').empty();
+        return;
+    }
+
+    $('#material_number').addClass('is-loading');
+
+    $.ajax({
+        url: '/search-sku',
+        type: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({ search_term: searchTerm }),
+        success: function (response) {
+            autocompleteResults = response.results || [];
+            displayAutocompleteResults();
+        },
+        error: function () {
+            $('#autocomplete_results').removeClass('show').empty();
+        },
+        complete: function () {
+            $('#material_number').removeClass('is-loading');
+        }
+    });
+}
+
+// Display autocomplete dropdown
+function displayAutocompleteResults() {
+    const $results = $('#autocomplete_results');
+    $results.empty();
+
+    if (autocompleteResults.length === 0) {
+        $results.html('<div class="no-results">No results found</div>');
+        $results.addClass('show');
+        return;
+    }
+
+    autocompleteResults.forEach((item, index) => {
+        const $item = $(`
+            <div class="autocomplete-item" data-index="${index}">
+                <div class="material-number">${item.material_number}</div>
+                <div class="product-desc">${item.product_description}</div>
+            </div>
+        `);
+        $results.append($item);
+    });
+
+    $results.addClass('show');
+    selectedIndex = -1;
+}
+
+// Select an autocomplete item
+function selectAutocompleteItem(index) {
+    if (index >= 0 && index < autocompleteResults.length) {
+        const selected = autocompleteResults[index];
+        $('#material_number').val(selected.material_number);
+        $('#autocomplete_results').removeClass('show').empty();
+        fetchSkuInfo(selected.material_number);
+    }
+}
+
+// Fetch SKU info (updated version)
+function fetchSkuInfo(materialNumber) {
+    if (!materialNumber) return;
+
+    const $mn = $('#material_number');
+    if ($mn.data('lastFetched') === materialNumber) return;
+    $mn.data('lastFetched', materialNumber);
+
+    $mn.addClass('is-loading');
+
+    $.ajax({
+        url: '/get-sku-info',
+        type: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({ material_number: materialNumber }),
+        success: function (res) {
+            // Update material number field (in case search was by description)
+            if (res.material_number) {
+                $('#material_number').val(res.material_number);
+            }
+
+            $('#product_description').val(res.product_description || '');
+            const weightPerItem = parseFloat(res.weight) || 0;
+            window.weightPerItem = weightPerItem;
+
+            // Clear & repopulate dropdowns
+            $('#batch_number').empty();
+            $('#racking_number').empty();
+            $('#shipment_number').empty();
+
+            // Batches - only show batches with available quantity > 0
+            const availQty = res.available_quantities || {};
+            (res.batch_numbers || []).forEach(b => {
+                let hasQuantity = false;
+                if (availQty[b]) {
+                    for (let rack in availQty[b]) {
+                        for (let ship in availQty[b][rack]) {
+                            if (availQty[b][rack][ship] > 0) {
+                                hasQuantity = true;
+                                break;
+                            }
+                        }
+                        if (hasQuantity) break;
+                    }
+                }
+
+                if (hasQuantity) {
+                    $('#batch_number').append('<option value="' + b + '">' + b + '</option>');
+                }
+            });
+
+            window.availableQuantities = res.available_quantities || {};
+            $('#batch_number').trigger('change');
+        },
+        error: function () {
+            $('#product_description').val('');
+            $('#batch_number').empty();
+            $('#racking_number').empty();
+            $('#shipment_number').empty();
+            window.availableQuantities = {};
+        },
+        complete: function () {
+            $('#material_number').removeClass('is-loading');
+            if (typeof updateAvailableQuantity === 'function') {
+                setTimeout(updateAvailableQuantity, 30);
+            }
+        }
+    });
+}
+
+// Bind autocomplete events
+(function bindAutocomplete() {
+    const $mn = $('#material_number');
+    const $results = $('#autocomplete_results');
+
+    // Debounced search
+    const debouncedSearch = debounce(function () {
+        const val = ($mn.val() || '').trim();
+        searchSku(val);
+    }, 300);
+
+    // Input event (typing)
+    $mn.on('input', debouncedSearch);
+
+    // Paste event
+    $mn.on('paste', function () {
+        setTimeout(debouncedSearch, 0);
+    });
+
+    // Keyboard navigation
+    $mn.on('keydown', function (e) {
+        const $items = $('.autocomplete-item');
+
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            selectedIndex = Math.min(selectedIndex + 1, $items.length - 1);
+            $items.removeClass('active').eq(selectedIndex).addClass('active');
+        } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            selectedIndex = Math.max(selectedIndex - 1, 0);
+            $items.removeClass('active').eq(selectedIndex).addClass('active');
+        } else if (e.key === 'Enter') {
+            e.preventDefault();
+            if (selectedIndex >= 0) {
+                selectAutocompleteItem(selectedIndex);
+            } else {
+                const val = ($mn.val() || '').trim();
+                if (val) fetchSkuInfo(val);
+            }
+        } else if (e.key === 'Escape') {
+            $results.removeClass('show').empty();
+        }
+    });
+
+    // Click on autocomplete item
+    $(document).on('click', '.autocomplete-item', function () {
+        const index = parseInt($(this).data('index'));
+        selectAutocompleteItem(index);
+    });
+
+    // Close autocomplete when clicking outside
+    $(document).on('click', function (e) {
+        if (!$(e.target).closest('#material_number, #autocomplete_results').length) {
+            $results.removeClass('show').empty();
+        }
+    });
+
+    // Blur event (fallback)
+    $mn.on('blur', function () {
+        setTimeout(function () {
+            if (!$(':focus').closest('#autocomplete_results').length) {
+                $results.removeClass('show');
+            }
+        }, 200);
+    });
+})();
     </script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 </body>
