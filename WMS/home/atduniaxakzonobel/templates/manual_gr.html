@@ -540,10 +540,10 @@ function recheckRowStrict(row) {
 }
 
 // ============================
-// Search SKU (unchanged)
+// FIXED Search SKU for Manual GR
 // ============================
+// Replace the search section (lines 543-655) with this code:
 
-// ---- fuzzy search + Enter support ----
 const $search = document.getElementById('material_number_search');
 const $btnSearch = document.getElementById('search_sku_btn');
 const $result = document.getElementById('search_result');
@@ -556,14 +556,12 @@ function renderMatches(matches){
   }
   // Otherwise list them as selectable
   const items = matches.map(m => {
-    const ship = (m.example_shipment ?? 'N/A');
     return `
       <button type="button" class="list-group-item list-group-item-action sku-pick"
               data-material="${m.material_number}"
               data-description="${m.product_description}">
         <div class="d-flex w-100 justify-content-between">
           <strong>${m.material_number}</strong>
-          <small class="text-muted">${ship}</small>
         </div>
         <div class="small text-muted">${m.product_description}</div>
       </button>`;
@@ -585,6 +583,9 @@ function applySku(data){
 
   // Show form if hidden
   document.getElementById('add_stock_form').classList.remove('d-none');
+  
+  // Focus on quantity field
+  document.getElementById('quantity').focus();
 }
 
 function doSearch(){
@@ -594,35 +595,23 @@ function doSearch(){
     return;
   }
 
-  // try fuzzy endpoint first
+  // Call the search-sku endpoint with correct parameter name
   fetch('/search-sku', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ q })
+    body: JSON.stringify({ search_term: q })  // ← FIXED: was 'q', now 'search_term'
   })
   .then(r => r.json())
   .then(data => {
     if (data.error) {
-      // fall back to legacy exact material_number search
-      return fetch('/search-sku', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ material_number: q })
-      }).then(r => r.json()).then(exact => {
-        if (exact.error) {
-          $result.innerHTML = `<div class="alert alert-danger">${exact.error}</div>`;
-          document.getElementById('add_stock_form').classList.add('d-none');
-        } else {
-          applySku(exact);
-        }
-      });
+      $result.innerHTML = `<div class="alert alert-danger">${data.error}</div>`;
+      document.getElementById('add_stock_form').classList.add('d-none');
+      return;
     }
 
-    if (Array.isArray(data.matches) && data.matches.length > 0) {
-      renderMatches(data.matches);
-    } else if (data.material_number) {
-      // API may directly return one match (same shape as /search-sku)
-      applySku(data);
+    // Check for results array (correct response structure)
+    if (Array.isArray(data.results) && data.results.length > 0) {
+      renderMatches(data.results);  // ← FIXED: was 'matches', now 'results'
     } else {
       $result.innerHTML = '<div class="alert alert-warning">No matches found.</div>';
       document.getElementById('add_stock_form').classList.add('d-none');
@@ -634,7 +623,10 @@ function doSearch(){
 }
 
 // Click search button
-$btnSearch.addEventListener('click', (e) => { e.preventDefault(); doSearch(); });
+$btnSearch.addEventListener('click', (e) => { 
+  e.preventDefault(); 
+  doSearch(); 
+});
 
 // ENTER to search
 $search.addEventListener('keydown', (e) => {
@@ -644,7 +636,7 @@ $search.addEventListener('keydown', (e) => {
   }
 });
 
-// pick from the multi-result list
+// Pick from the multi-result list
 document.addEventListener('click', (e) => {
   const btn = e.target.closest('.sku-pick');
   if (!btn) return;

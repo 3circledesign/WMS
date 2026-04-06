@@ -3265,8 +3265,10 @@ def execute_mass_transfer():
             )
             db.session.add(history_in)
             
-            # Remove stock from source (set quantity to 0 or delete)
-            db.session.delete(stock)  # Delete the source stock entry
+            # FIXED: Set quantity to 0 instead of deleting
+            # This preserves stock_history foreign key relationships
+            stock.quantity = 0
+            db.session.add(stock)
             
             transfer_count += 1
             total_quantity_transferred += quantity
