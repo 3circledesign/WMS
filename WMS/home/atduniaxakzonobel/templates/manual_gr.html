@@ -588,6 +588,9 @@ function applySku(data){
   document.getElementById('quantity').focus();
 }
 
+// FIXED doSearch function for manual_gr.html
+// Replace the doSearch function (around line 590-623) with this:
+
 function doSearch(){
   const q = ($search.value || '').trim();
   if (!q) {
@@ -595,11 +598,11 @@ function doSearch(){
     return;
   }
 
-  // Call the search-sku endpoint with correct parameter name
-  fetch('/search-sku', {
+  // Call the CORRECT endpoint for GR - search-sku-for-gr
+  fetch('/search-sku-for-gr', {  // ← CHANGED from '/search-sku'
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ search_term: q })  // ← FIXED: was 'q', now 'search_term'
+    body: JSON.stringify({ search_term: q })
   })
   .then(r => r.json())
   .then(data => {
@@ -609,9 +612,9 @@ function doSearch(){
       return;
     }
 
-    // Check for results array (correct response structure)
+    // Check for results array
     if (Array.isArray(data.results) && data.results.length > 0) {
-      renderMatches(data.results);  // ← FIXED: was 'matches', now 'results'
+      renderMatches(data.results);
     } else {
       $result.innerHTML = '<div class="alert alert-warning">No matches found.</div>';
       document.getElementById('add_stock_form').classList.add('d-none');

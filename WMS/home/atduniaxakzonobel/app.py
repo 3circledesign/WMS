@@ -3184,7 +3184,108 @@ def get_rack_contents(racking_number):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+# Add these routes to app.py for cycle count search functionality
 
+@app.route('/search-sku-cycle-count', methods=['POST'])
+@login_required
+def search_sku_cycle_count():
+    """Search SKU by material number OR product description for cycle count"""
+    try:
+        data = request.get_json()
+        search_term = (data.get('search_term') or '').strip()
+        
+        if not search_term:
+            return jsonify({'results': []}), 200
+        
+        # Search by material_number OR product_description (case-insensitive)
+        # Join with Stock to get all SKUs that have stock entries
+        skus = db.session.query(SKU).join(Stock).filter(
+            (SKU.material_number.like(f'%{search_term}%')) | 
+            (SKU.product_description.like(f'%{search_term}%'))
+        ).distinct().limit(10).all()
+        
+        results = []
+        for sku in skus:
+            results.append({
+                'material_number': sku.material_number,
+                'product_description': sku.product_description,
+                'display': f"{sku.material_number} - {sku.product_description}"
+            })
+        
+        return jsonify({'results': results}), 200
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/search-racking', methods=['POST'])
+@login_required
+def search_racking():
+    """Search racking numbers"""
+    try:
+        data = request.get_json()
+        search_term = (data.get('search_term') or '').strip()
+        
+        if not search_term:
+            return jsonify({'results': []}), 200
+        
+        # Search racking numbers (case-insensitive)
+        rackings = Racking.query.filter(
+            Racking.racking_number.like(f'%{search_term}%')
+        ).limit(10).all()
+        
+        results = []
+        for racking in rackings:
+            results.append({
+                'racking_number': racking.racking_number,
+                'aisle': racking.aisle or '',
+                'display': f"{racking.racking_number} (Aisle: {racking.aisle or 'N/A'})"
+            })
+        
+        return jsonify({'results': results}), 200
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# Add this route to app.py for Manual GR (around line 792, after search-sku)
+
+@app.route('/search-sku-for-gr', methods=['POST'])
+@login_required
+def search_sku_for_gr():
+    """Search SKU by material number OR product description for Goods Receiving
+    This version does NOT filter by stock quantity - allows receiving new items"""
+    try:
+        data = request.get_json()
+        search_term = (data.get('search_term') or '').strip()
+        
+        if not search_term:
+            return jsonify({'results': []}), 200
+        
+        # Search by material_number OR product_description (case-insensitive)
+        # NO stock filter - GR needs to receive items that have zero stock!
+        skus = SKU.query.filter(
+            (SKU.material_number.like(f'%{search_term}%')) | 
+            (SKU.product_description.like(f'%{search_term}%'))
+        ).limit(10).all()
+        
+        results = []
+        for sku in skus:
+            # Get example shipment number if any stock exists
+            example_stock = Stock.query.filter_by(sku_id=sku.id).first()
+            example_shipment = example_stock.shipment_number if example_stock else None
+            
+            results.append({
+                'material_number': sku.material_number,
+                'product_description': sku.product_description,
+                'example_shipment': example_shipment,
+                'display': f"{sku.material_number} - {sku.product_description}"
+            })
+        
+        return jsonify({'results': results}), 200
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+                
 @app.route('/execute-mass-transfer', methods=['POST'])
 @login_required
 def execute_mass_transfer():
