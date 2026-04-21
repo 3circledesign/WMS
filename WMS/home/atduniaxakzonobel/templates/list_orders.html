@@ -32,7 +32,7 @@
         }
 
         .container {
-            max-width: 1200px;
+            max-width: 1400px;
             padding-top: 40px;
         }
 
@@ -56,6 +56,20 @@
 
         .table-striped tbody tr:nth-of-type(odd) {
             background-color: #f8f9fa;
+        }
+
+        /* Address column styling */
+        .address-cell {
+            max-width: 200px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            cursor: help;
+        }
+
+        .address-cell:hover {
+            white-space: normal;
+            word-wrap: break-word;
         }
 
         .alert {
@@ -166,44 +180,50 @@
     </form>
 
     <!-- Orders Table -->
-    <table class="table table-striped">
-        <thead>
-            <tr>
-                <th>Sales Order</th>
-                <th>DN Number</th>
-                <th>Customer Name</th>
-                <th>Created At</th>
-                <th>Created by</th>
-                <th>Remarks</th>
-                <th>Status</th>
-                <th>Actions</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for order in orders %}
-            <tr>
-                <td>{{ order.sales_order }}</td>
-                <td>{{ order.dn_number }}</td>
-                <td>{{ order.customer_name }}</td>
-                <td>{{ order.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
-                <td>{{ order.created_by }}</td>
-                <td>{{ order.remarks }}</td>
-<td>
-    {% if order.status == 'cancelled' %}
-        <span class="badge bg-danger">Cancelled</span>
-    {% elif order.status == 'completed' %}
-        <span class="badge bg-primary">Completed</span>
-    {% else %}
-        <span class="badge bg-success">Active</span>
-    {% endif %}
-</td>
-                <td>
-                    <a href="{{ url_for('view_order', order_id=order.id) }}" class="btn btn-info btn-sm">View</a>
-                </td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
+    <div class="table-responsive">
+        <table class="table table-striped">
+            <thead>
+                <tr>
+                    <th>Sales Order</th>
+                    <th>DN Number</th>
+                    <th>Customer Name</th>
+                    <th>Address</th>  <!-- NEW COLUMN -->
+                    <th>Created At</th>
+                    <th>Created by</th>
+                    <th>Remarks</th>
+                    <th>Status</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for order in orders %}
+                <tr>
+                    <td>{{ order.sales_order }}</td>
+                    <td>{{ order.dn_number }}</td>
+                    <td>{{ order.customer_name }}</td>
+                    <td class="address-cell" title="{{ order.address }}">
+                        {{ order.address[:50] }}{% if order.address|length > 50 %}...{% endif %}
+                    </td>  <!-- NEW COLUMN -->
+                    <td>{{ order.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+                    <td>{{ order.created_by }}</td>
+                    <td>{{ order.remarks }}</td>
+    <td>
+        {% if order.status == 'cancelled' %}
+            <span class="badge bg-danger">Cancelled</span>
+        {% elif order.status == 'completed' %}
+            <span class="badge bg-primary">Completed</span>
+        {% else %}
+            <span class="badge bg-success">Active</span>
+        {% endif %}
+    </td>
+                    <td>
+                        <a href="{{ url_for('view_order', order_id=order.id) }}" class="btn btn-info btn-sm">View</a>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
 
     <!-- Pagination -->
     <div class="d-flex justify-content-center">
@@ -229,7 +249,7 @@
                     <li class="page-item"><a class="page-link" href="{{ url_for('list_orders', page=page_num, search=search) }}">{{ page_num }}</a></li>
                     {% endif %}
                 {% else %}
-                <li class="page-item disabled"><span class="page-link">...</span></li>
+                <li class="page-item disabled"><span class="page-list">...</span></li>
                 {% endif %}
                 {% endfor %}
 

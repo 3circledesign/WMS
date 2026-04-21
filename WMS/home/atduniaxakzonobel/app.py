@@ -2922,73 +2922,94 @@ def toggle_order_status(order_id):
     return jsonify({'message': message, 'new_status': order.status}), 200
 
 
-@app.route('/cycle-count')
+# UPDATED CYCLE COUNT ROUTE - Groups by Racking/Bay
+# Replace the existing /cycle-count route with this
+
+@app.route('/cycle-count', methods=['GET'])
 @login_required
 def cycle_count():
-    """Display all SKUs with current quantities for cycle count (printable)"""
-    include_zero = request.args.get('include_zero', 'yes')
+    """Print view for cycle count - grouped by racking/bay"""
+    from datetime import datetime
+
+    # Get filters
     selected_racking = request.args.get('racking_number', 'all')
-    selected_sku = request.args.get('material_number', 'all')  # NEW: SKU filter
+    include_zero = request.args.get('include_zero', 'no')
 
-    # Get all racking numbers for the dropdown
-    all_rackings = db.session.query(Stock.racking_number) \
-        .distinct() \
-        .filter(Stock.racking_number != None) \
-        .filter(Stock.racking_number != '') \
-        .order_by(Stock.racking_number) \
-        .all()
-    racking_list = [r[0] for r in all_rackings]
+    # Get all racking numbers
+    all_rackings = Racking.query.order_by(Racking.racking_number).all()
 
-    # NEW: Get all SKUs for the dropdown
-    all_skus = db.session.query(SKU.material_number, SKU.product_description) \
-        .order_by(SKU.material_number) \
-        .all()
-    sku_list = [(sku.material_number, sku.product_description) for sku in all_skus]
+    # Build racking list with rack letters AND specific bays
+    racking_list = []
 
-    # Query to get all stocks with SKU details
+    # Add rack letters (A, B, C, D, etc.)
+    rack_letters = set()
+    for r in all_rackings:
+        rack_letter = r.racking_number.split('-')[0] if '-' in r.racking_number else r.racking_number[0]
+        rack_letters.add(rack_letter)
+
+    # Add rack letters first
+    for letter in sorted(rack_letters):
+        racking_list.append(letter)
+
+    # Add specific bays
+    for r in all_rackings:
+        racking_list.append(r.racking_number)
+
+    # Query stocks
     query = db.session.query(
+        Stock.id.label('stock_id'),
         SKU.material_number,
         SKU.product_description,
-        Stock.id.label('stock_id'),
         Stock.batch_number,
         Stock.shipment_number,
         Stock.racking_number,
         Stock.quantity,
         Stock.remarks
-    ).join(Stock, SKU.id == Stock.sku_id)
+    ).join(SKU, Stock.sku_id == SKU.id)
 
-    # Filter by racking number if specific racking selected
+    # Apply racking filter
     if selected_racking != 'all':
-        query = query.filter(Stock.racking_number == selected_racking)
+        # If single letter (A, B, C), show all bays in that rack
+        if len(selected_racking) == 1:
+            query = query.filter(Stock.racking_number.like(f'{selected_racking}-%'))
+        else:
+            # Specific bay
+            query = query.filter(Stock.racking_number == selected_racking)
 
-    # NEW: Filter by SKU if specific SKU selected
-    if selected_sku != 'all':
-        query = query.filter(SKU.material_number == selected_sku)
-
-    # Filter based on include_zero parameter
+    # Apply zero stock filter
     if include_zero == 'no':
         query = query.filter(Stock.quantity > 0)
 
-    stocks = query.order_by(SKU.material_number, Stock.batch_number, Stock.racking_number).all()
+    # Order by racking number, then material number
+    query = query.order_by(Stock.racking_number, SKU.material_number, Stock.batch_number)
 
-    # Group stocks by SKU for better display
-    sku_stocks = defaultdict(list)
+    stocks = query.all()
+
+    # Group by racking number (instead of material number)
+    racking_stocks = {}
     for stock in stocks:
-        sku_stocks[stock.material_number].append(stock)
+        rack_num = stock.racking_number
+        if rack_num not in racking_stocks:
+            racking_stocks[rack_num] = []
 
-    # Calculate total stock lines
-    total_stock_lines = len(stocks)
+        racking_stocks[rack_num].append({
+            'stock_id': stock.stock_id,
+            'material_number': stock.material_number,
+            'product_description': stock.product_description,
+            'batch_number': stock.batch_number,
+            'shipment_number': stock.shipment_number,
+            'racking_number': stock.racking_number,
+            'quantity': stock.quantity,
+            'remarks': stock.remarks
+        })
 
     return render_template('cycle_count_print.html',
-                           sku_stocks=sku_stocks,
-                           include_zero=include_zero,
-                           count_date=datetime.now().strftime('%Y-%m-%d'),
-                           total_stock_lines=total_stock_lines,
+                           racking_stocks=racking_stocks,  # Changed from sku_stocks
                            racking_list=racking_list,
                            selected_racking=selected_racking,
-                           sku_list=sku_list,  # NEW
-                           selected_sku=selected_sku)  # NEW
-
+                           include_zero=include_zero,
+                           count_date=datetime.now().strftime('%Y-%m-%d'),
+                           total_stock_lines=len(stocks))
 
 @app.route('/cycle-count/perform')
 @login_required
