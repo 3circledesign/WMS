@@ -162,7 +162,7 @@
 </form>
 
 <!-- Stock List Table -->
-<div id="stock_table_container" class="table-responsive d-none">
+<div id="stock_table_container" class="table-responsive {% if not stocks %}d-none{% endif %}">
     <table id="stock_table" class="table table-borderless table-striped align-middle">
         <thead class="table-dark">
             <tr>
@@ -197,6 +197,10 @@
                 <td>
                     <button class="btn btn-primary transfer-btn" data-stock-id="{{ stock.id }}">Transfer</button>
                 </td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="8" class="text-center">No stocks found. Try searching above.</td>
             </tr>
             {% endfor %}
         </tbody>

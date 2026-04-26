@@ -1560,7 +1560,7 @@ def show_transfer_stock():
     material_number_search = request.args.get('material_number', '').strip()
     batch_number_search = request.args.get('batch_number', '').strip()
     page = request.args.get('page', 1, type=int)
-    per_page = 10  # Adjust based on your needs
+    per_page = 100  # CHANGED: Was 10, now 100 (shows more items)
 
     query = Stock.query.join(SKU)
 
@@ -1569,6 +1569,9 @@ def show_transfer_stock():
 
     if batch_number_search:
         query = query.filter(Stock.batch_number.ilike(f"%{batch_number_search}%"))
+
+    # ADDED: Filter out zero quantity stocks (like stock list does)
+    query = query.filter(Stock.quantity > 0)
 
     stocks_paginated = query.paginate(page=page, per_page=per_page, error_out=False)
 
@@ -1665,6 +1668,7 @@ def transfer_stock(stock_id):
         db.session.rollback()
         return jsonify({'error': f'Error transferring stock: {str(e)}'}), 500
 
+
 @app.route('/transfer-batch', methods=['GET'])
 @login_required
 def show_transfer_batch():
@@ -1672,7 +1676,7 @@ def show_transfer_batch():
     material_number_search = request.args.get('material_number', '').strip()
     batch_number_search = request.args.get('batch_number', '').strip()
     page = request.args.get(get_page_parameter(), type=int, default=1)
-    per_page = 10  # Number of items per page
+    per_page = 100  # CHANGED: Was 10, now 100 (shows more items)
 
     # Base query to fetch all stocks and join with SKU
     query = Stock.query.join(SKU)
@@ -1684,6 +1688,9 @@ def show_transfer_batch():
     # Filter by batch number if provided
     if batch_number_search:
         query = query.filter(Stock.batch_number.ilike(f"%{batch_number_search}%"))
+
+    # ADDED: Filter out zero quantity stocks (like stock list does)
+    query = query.filter(Stock.quantity > 0)
 
     # Paginate the query
     paginated_query = query.paginate(page=page, per_page=per_page, error_out=False)
@@ -3414,6 +3421,161 @@ def execute_mass_transfer():
     except Exception as e:
         db.session.rollback()
         return jsonify({'error': f'Error during mass transfer: {str(e)}'}), 500
+
+
+@app.route('/bulk-transfer-racking', methods=['GET'])
+@login_required
+def bulk_transfer_racking():
+    """Display page for bulk transfer to single racking"""
+
+    # Get all stocks with quantity > 0
+    stocks = db.session.query(Stock).join(SKU).filter(Stock.quantity > 0).all()
+
+    # Get all racking numbers for destination dropdown
+    racking_numbers = Racking.query.order_by(Racking.racking_number).all()
+
+    return render_template('bulk_transfer_racking.html',
+                           stocks=stocks,
+                           racking_numbers=racking_numbers)
+
+
+@app.route('/bulk-transfer-racking/execute', methods=['POST'])
+@login_required
+def execute_bulk_transfer():
+    """Execute bulk transfer of multiple stocks to one destination"""
+
+    try:
+        data = request.get_json()
+        transfers = data.get('transfers', [])  # List of {stock_id, quantity}
+        destination_racking = data.get('destination_racking')
+
+        if not transfers or not destination_racking:
+            return jsonify({'error': 'Missing transfer data or destination'}), 400
+
+        # Validate destination racking exists
+        dest_rack = Racking.query.filter_by(racking_number=destination_racking).first()
+        if not dest_rack:
+            return jsonify({'error': f'Destination racking {destination_racking} not found'}), 400
+
+        successful_transfers = []
+        failed_transfers = []
+
+        for transfer in transfers:
+            stock_id = transfer.get('stock_id')
+            quantity = int(transfer.get('quantity', 0))
+
+            if quantity <= 0:
+                continue
+
+            # Get source stock
+            source_stock = Stock.query.get(stock_id)
+            if not source_stock:
+                failed_transfers.append({
+                    'stock_id': stock_id,
+                    'reason': 'Stock not found'
+                })
+                continue
+
+            if source_stock.quantity < quantity:
+                failed_transfers.append({
+                    'stock_id': stock_id,
+                    'material': source_stock.sku.material_number,
+                    'reason': f'Insufficient quantity (available: {source_stock.quantity})'
+                })
+                continue
+
+            # Check if destination already has this exact stock (same SKU, batch, shipment)
+            existing_dest = Stock.query.filter_by(
+                sku_id=source_stock.sku_id,
+                batch_number=source_stock.batch_number,
+                shipment_number=source_stock.shipment_number,
+                racking_number=destination_racking
+            ).first()
+
+            if existing_dest:
+                # Merge with existing stock
+                existing_dest.quantity += quantity
+            else:
+                # Create new stock record at destination
+                new_stock = Stock(
+                    sku_id=source_stock.sku_id,
+                    batch_number=source_stock.batch_number,
+                    shipment_number=source_stock.shipment_number,
+                    racking_number=destination_racking,
+                    quantity=quantity,
+                    remarks=source_stock.remarks,
+                    timestamp=datetime.now()  # ✅ FIXED
+                )
+                db.session.add(new_stock)
+
+            # Reduce source quantity
+            source_stock.quantity -= quantity
+
+            # Create stock history record
+            history = StockHistory(
+                stock_id=source_stock.id,
+                change_type='bulk_transfer',
+                quantity=-quantity,
+                username=current_user.username,
+                timestamp=datetime.now(),
+                remarks=f'Bulk transferred {quantity} units from {source_stock.racking_number} to {destination_racking}'
+            )
+            db.session.add(history)
+
+            successful_transfers.append({
+                'material': source_stock.sku.material_number,
+                'batch': source_stock.batch_number,
+                'quantity': quantity,
+                'from': source_stock.racking_number,
+                'to': destination_racking
+            })
+
+        # Commit all changes
+        db.session.commit()
+
+        return jsonify({
+            'success': True,
+            'message': f'Successfully transferred {len(successful_transfers)} items',
+            'successful': successful_transfers,
+            'failed': failed_transfers
+        })
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/search-stocks-for-transfer', methods=['GET'])
+@login_required
+def search_stocks_for_transfer():
+    """Search stocks for bulk transfer"""
+
+    search_term = request.args.get('search', '').strip()
+
+    query = db.session.query(Stock).join(SKU).filter(Stock.quantity > 0)
+
+    if search_term:
+        query = query.filter(
+            or_(
+                SKU.material_number.ilike(f"%{search_term}%"),
+                SKU.product_description.ilike(f"%{search_term}%"),
+                Stock.batch_number.ilike(f"%{search_term}%"),
+                Stock.racking_number.ilike(f"%{search_term}%")
+            )
+        )
+
+    stocks = query.all()
+
+    stocks_data = [{
+        'id': stock.id,
+        'material_number': stock.sku.material_number,
+        'product_description': stock.sku.product_description,
+        'batch_number': stock.batch_number,
+        'racking_number': stock.racking_number,
+        'quantity': stock.quantity
+    } for stock in stocks]
+
+    return jsonify({'stocks': stocks_data})
 
 if __name__ == '__main__':
     from zeroconf import ServiceInfo, Zeroconf
