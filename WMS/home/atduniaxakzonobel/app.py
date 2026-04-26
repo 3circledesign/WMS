@@ -3011,13 +3011,14 @@ def cycle_count():
                            count_date=datetime.now().strftime('%Y-%m-%d'),
                            total_stock_lines=len(stocks))
 
+
 @app.route('/cycle-count/perform')
 @login_required
 def cycle_count_perform():
     """Form to enter actual counted quantities"""
     include_zero = request.args.get('include_zero', 'yes')
     selected_racking = request.args.get('racking_number', 'all')
-    selected_sku = request.args.get('material_number', 'all')  # NEW: SKU filter
+    selected_sku = request.args.get('material_number', 'all')
 
     # Get all racking numbers for the dropdown
     all_rackings = db.session.query(Stock.racking_number) \
@@ -3028,7 +3029,7 @@ def cycle_count_perform():
         .all()
     racking_list = [r[0] for r in all_rackings]
 
-    # NEW: Get all SKUs for the dropdown
+    # Get all SKUs for the dropdown
     all_skus = SKU.query.order_by(SKU.material_number).all()
     sku_list = [(sku.material_number, sku.product_description) for sku in all_skus]
 
@@ -3046,10 +3047,16 @@ def cycle_count_perform():
     ).outerjoin(Stock, SKU.id == Stock.sku_id)
 
     # Filter by racking number if specific racking selected
+    # FIXED: Added support for whole rack selection (like "A" shows all "A-*")
     if selected_racking != 'all':
-        query = query.filter(Stock.racking_number == selected_racking)
+        # If single letter (A, B, C), show all bays in that rack
+        if len(selected_racking) == 1:
+            query = query.filter(Stock.racking_number.like(f'{selected_racking}-%'))
+        else:
+            # Specific bay
+            query = query.filter(Stock.racking_number == selected_racking)
 
-    # NEW: Filter by SKU if specific SKU selected
+    # Filter by SKU if specific SKU selected
     if selected_sku != 'all':
         query = query.filter(SKU.material_number == selected_sku)
 
@@ -3069,8 +3076,8 @@ def cycle_count_perform():
                            include_zero=include_zero,
                            racking_list=racking_list,
                            selected_racking=selected_racking,
-                           sku_list=sku_list,  # NEW
-                           selected_sku=selected_sku)  # NEW
+                           sku_list=sku_list,
+                           selected_sku=selected_sku)
 
 
 @app.route('/cycle-count/update', methods=['POST'])
