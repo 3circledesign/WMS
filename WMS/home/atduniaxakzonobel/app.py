@@ -2141,7 +2141,7 @@ def create_order():
                 (Stock.shipment_number == None) | (Stock.shipment_number == '') | (Stock.shipment_number == 'N/A')
             )
 
-        stock = stock_query.first()
+        stock = stock_query.filter(Stock.quantity > 0).first()
 
         if not stock:
             return jsonify({
@@ -2402,7 +2402,7 @@ def cancel_order(order_id):
             # Match specific shipment number
             stock_query = stock_query.filter_by(shipment_number=shipment_for_query)
         
-        stock = stock_query.first()
+        stock = stock_query.filter(Stock.quantity > 0).first()
         
         if stock:
             # Stock record exists - add quantity back
