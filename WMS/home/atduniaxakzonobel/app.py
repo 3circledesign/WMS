@@ -2218,6 +2218,48 @@ def generate_picklist_pdf(order):
     return file_path
 
 
+def truncate_text_to_fit(pdf, text, max_width):
+    """Truncate text to fit within max_width, adding ellipsis if needed"""
+
+    if not text:
+        return ''
+
+    # Check if text fits as-is
+    if pdf.get_string_width(text) <= max_width:
+        return text
+
+    # Add ellipsis and truncate
+    ellipsis = '...'
+    ellipsis_width = pdf.get_string_width(ellipsis)
+    available_width = max_width - ellipsis_width
+
+    # Find max characters that fit
+    left = 0
+    right = len(text)
+    result = ''
+
+    while left < right:
+        mid = (left + right + 1) // 2
+        test_text = text[:mid]
+
+        if pdf.get_string_width(test_text) <= available_width:
+            result = test_text
+            left = mid
+        else:
+            right = mid - 1
+
+    return result + ellipsis if result else text[:1] + ellipsis
+
+
+# First, install WeasyPrint:
+# pip install weasyprint --break-system-packages
+
+from flask import render_template
+import pdfkit
+import tempfile
+import os
+
+
 @app.route('/print-order/<int:order_id>')
 @login_required
 def print_order(order_id):
@@ -2227,132 +2269,183 @@ def print_order(order_id):
     unique_skus = {item.sku.material_number for item in order.items}
     total_sku = len(unique_skus)
     total_quantity = sum(item.quantity for item in order.items)
-    total_weight = sum(item.quantity * item.sku.weight for item in order.items)  # Total weight
+    total_weight = sum(item.quantity * item.sku.weight for item in order.items)
 
-    pdf = FPDF()
-    pdf.set_auto_page_break(auto=False)  # Disable automatic page breaks
-    pdf.alias_nb_pages()  # For page numbering
-    pdf.add_page()
+    # Render HTML template
+    html_content = render_template('order_pdf_template.html',
+                                   order=order,
+                                   total_sku=total_sku,
+                                   total_quantity=total_quantity,
+                                   total_weight=total_weight,
+                                   logo_path=url_for('static', filename='logo.png', _external=True),
+                                   akzonobel_path=url_for('static', filename='akzonobel.png', _external=True))
 
-    # Add logo and initial order details (only on the first page)
-    logo_path = os.path.join(app.root_path, 'static', 'logo.png')
-    pdf.image(logo_path, x=1, y=1, w=45)
-    pdf.set_y(30)
-    logo_akzonobel = os.path.join(app.root_path, 'static', 'akzonobel.png')
-    pdf.image(logo_akzonobel, x=150, y=10, w=50)
-    pdf.set_y(30)
+    # Configure wkhtmltopdf path
+    config = pdfkit.configuration(wkhtmltopdf=r'C:\Program Files\wkhtmltopdf\bin\wkhtmltopdf.exe')
 
-    # Set up PDF layout for the first page
-    pdf.set_font("helvetica", 'B', size=11)  # Slightly smaller fonts
-    pdf.cell(200, 10, text=f"DN #: {order.dn_number}", new_x=XPos.LMARGIN, new_y=YPos.NEXT, align='C')
+    # Options for PDF generation with page numbers
+    options = {
+        'page-size': 'A4',
+        'margin-top': '15mm',
+        'margin-right': '15mm',
+        'margin-bottom': '25mm',  # Extra space for footer
+        'margin-left': '15mm',
+        'encoding': "UTF-8",
+        'no-outline': None,
+        'enable-local-file-access': None,
 
-    pdf.set_font("helvetica", size=9)
-    pdf.ln(5)  # Line break
-    pdf.cell(100, 5, text=f"Sales Order: {order.sales_order}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-    pdf.cell(100, 5, text=f"Customer Name: {order.customer_name}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-    pdf.cell(100, 5, text=f"Address: {order.address}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-    pdf.cell(100, 5, text=f"Created At: {order.created_at.strftime('%Y-%m-%d %H:%M')}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-    pdf.cell(100, 5, text=f"Created by: {order.created_by}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-    pdf.cell(100, 5, text=f"Remarks: {order.remarks}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-    pdf.cell(100, 5, text=f"Status: {order.status}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-    pdf.cell(100, 5, text=f"Total SKUs: {total_sku}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-    pdf.cell(100, 5, text=f"Total Quantity: {total_quantity}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-    pdf.cell(100, 5, text=f"Total Weight: {total_weight:.2f} kg", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-    pdf.ln(10)  # Line break
-
-    # Adjusted column widths for better fit
-    col_widths = {
-        'material': 20,
-        'description': 50,  # Reduced the width for better fit
-        'batch': 28,
-        'shipment': 25,
-        'quantity': 15,
-        'weight': 25,
-        'racking': 20,
+        # FOOTER WITH PAGE NUMBERS
+        'footer-center': 'Page [page] of [topage]',
+        'footer-font-size': '8',
+        'footer-spacing': '5',
     }
 
-    # Add order items header (once)
-    pdf.set_font("helvetica", 'B', size=8)  # Reduced font size for headers
-    pdf.set_fill_color(200, 200, 200)  # Set background color for the header
+    # Generate PDF from HTML with options
+    pdf = pdfkit.from_string(html_content, False, configuration=config, options=options)
 
-    # Header row with reduced font size
-    pdf.cell(col_widths['material'], 8, "Material", border=1, fill=True, align='C')
-    pdf.cell(col_widths['description'], 8, "Product Desc.", border=1, fill=True, align='C')
-    pdf.cell(col_widths['batch'], 8, "Batch No.", border=1, fill=True, align='C')
-    pdf.cell(col_widths['shipment'], 8, "Shipment No.", border=1, fill=True, align='C')
-    pdf.cell(col_widths['quantity'], 8, "Qty", border=1, fill=True, align='C')
-    pdf.cell(col_widths['weight'], 8, "Total Wt (kg)", border=1, fill=True, align='C')
-    pdf.cell(col_widths['racking'], 8, "Racking", border=1, fill=True, align='C')
-    pdf.ln()
-
-    # Add page number footer on every page
-    def add_footer():
-        pdf.set_y(-15)
-        pdf.set_font("helvetica", 'I', 8)
-        pdf.cell(0, 10, f'Page {pdf.page_no()}/{{nb}}', align='C')
-
-    # Function to check if a new page is needed
-    def check_page_break():
-        if pdf.get_y() > 240:
-            add_footer()  # Add footer before adding a new page
-            pdf.add_page()
-
-            # Reprint table headers on a new page
-            pdf.set_font("helvetica", 'B', size=8)
-            pdf.set_fill_color(200, 200, 200)
-            pdf.cell(col_widths['material'], 8, "Material", border=1, fill=True, align='C')
-            pdf.cell(col_widths['description'], 8, "Product Desc.", border=1, fill=True, align='C')
-            pdf.cell(col_widths['batch'], 8, "Batch No.", border=1, fill=True, align='C')
-            pdf.cell(col_widths['shipment'], 8, "Shipment No.", border=1, fill=True, align='C')
-            pdf.cell(col_widths['quantity'], 8, "Qty", border=1, fill=True, align='C')
-            pdf.cell(col_widths['weight'], 8, "Total Wt (kg)", border=1, fill=True, align='C')
-            pdf.cell(col_widths['racking'], 8, "Racking", border=1, fill=True, align='C')
-            pdf.ln()
-
-    # Add order items to the PDF
-    pdf.set_font("helvetica", size=9)  # Reduced font size for table content
-    for item in order.items:
-        check_page_break()  # Check for page break before adding each item
-
-        # Estimate the row height based on the product description
-        row_height = pdf.get_string_width(item.sku.product_description) // col_widths['description'] + 1
-        row_height = max(10, row_height * 5)  # Set the row height, with a minimum of 10
-
-        # Material Number
-        pdf.cell(col_widths['material'], row_height, item.sku.material_number, border=1, align='C')
-
-        # Product Description - using multi_cell to wrap text
-        x, y = pdf.get_x(), pdf.get_y()
-        pdf.multi_cell(col_widths['description'], 5, item.sku.product_description, border=1, align='C')
-        pdf.set_xy(x + col_widths['description'], y)
-
-        # Batch Number
-        pdf.cell(col_widths['batch'], row_height, item.batch_number, border=1, align='C')
-
-        # Shipment Number
-        shipment_number = item.shipment_number if item.shipment_number else ''
-        pdf.cell(col_widths['shipment'], row_height, shipment_number, border=1, align='C')
-
-        # Quantity
-        pdf.cell(col_widths['quantity'], row_height, str(item.quantity), border=1, align='C')
-
-        # Total Weight
-        pdf.cell(col_widths['weight'], row_height, f"{item.quantity * item.sku.weight:.2f}", border=1, align='C')
-
-        # Racking Number
-        pdf.cell(col_widths['racking'], row_height, item.racking_number, border=1, align='C')
-        pdf.ln(row_height)
-
-    # Add footer on the last page (after all content is added)
-    add_footer()
-
-    # Create a temporary file to save the PDF
+    # Save to temp file
     with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_file:
-        pdf.output(temp_file.name)
+        temp_file.write(pdf)
         temp_file_path = temp_file.name
 
-    # Send the PDF as a response
-    return send_file(temp_file_path, as_attachment=True, download_name=f"order_{order.dn_number}.pdf", mimetype='application/pdf')
+    # Check if this is for printing (inline) or downloading
+    if request.args.get('print') == 'true':
+        return send_file(temp_file_path,
+                         as_attachment=False,
+                         download_name=f"order_{order.dn_number}.pdf",
+                         mimetype='application/pdf')
+    else:
+        return send_file(temp_file_path,
+                         as_attachment=True,
+                         download_name=f"order_{order.dn_number}.pdf",
+                         mimetype='application/pdf')
+
+from collections import defaultdict
+import re
+
+@app.route('/rack-status')
+@login_required
+def rack_status():
+
+    all_racks = Racking.query.order_by(Racking.aisle, Racking.level, Racking.position).all()
+
+    # Get occupied racking numbers with qty > 0
+    occupied_racking_numbers = {
+        r[0] for r in db.session.query(Stock.racking_number)
+        .filter(Stock.quantity > 0).distinct().all()
+    }
+
+    # Build rack info lookup: racking_number -> rack data
+    rack_lookup = {}
+
+    for rack in all_racks:
+        is_occupied = rack.racking_number in occupied_racking_numbers
+        total_qty = 0
+        has_mixed_packsize = False
+
+        if is_occupied:
+            stocks = Stock.query.filter(
+                Stock.racking_number == rack.racking_number,
+                Stock.quantity > 0
+            ).all()
+            total_qty = sum(s.quantity for s in stocks)
+
+            pack_size_groups = set()
+            for s in stocks:
+                if s.sku.pack_size is not None:
+                    try:
+                        pack_size_groups.add(int(float(s.sku.pack_size.size)))
+                    except (ValueError, TypeError):
+                        pack_size_groups.add(s.sku.pack_size.size)
+            has_mixed_packsize = len(pack_size_groups) > 1
+
+        rack_lookup[rack.racking_number] = {
+            'is_occupied': is_occupied,
+            'total_qty': total_qty,
+            'has_mixed_packsize': has_mixed_packsize,
+        }
+
+    # Parse rack numbers and group by aisle
+    # Format: {Aisle}-{Bay:02d}-{ColLetter}{BinIndex}  e.g. A-06-E2
+    aisle_data = defaultdict(lambda: {
+        'bays': set(),
+        'cols': set(),
+        'bins': set(),
+        'racks': {}  # { (bay, col, bin): rack_number }
+    })
+
+    for rack in all_racks:
+        parts = rack.racking_number.split('-')
+        if len(parts) != 3:
+            continue
+        aisle = parts[0]
+        bay = int(parts[1])
+        col_bin = parts[2]  # e.g. "E2"
+
+        match = re.match(r'([A-Za-z]+)(\d+)', col_bin)
+        if not match:
+            continue
+        col = match.group(1).upper()
+        bin_num = int(match.group(2))
+
+        aisle_data[aisle]['bays'].add(bay)
+        aisle_data[aisle]['cols'].add(col)
+        aisle_data[aisle]['bins'].add(bin_num)   # FIX: store bin_num directly
+        aisle_data[aisle]['racks'][(bay, col, bin_num)] = rack.racking_number
+
+    # Sort everything and convert to plain dict
+    result = {}
+    for aisle in sorted(aisle_data.keys()):
+        d = aisle_data[aisle]
+        result[aisle] = {
+            'bays': sorted(d['bays'], reverse=True),   # 06, 05, 04...
+            'cols': sorted(d['cols'], reverse=True),   # E, D, C, B, A
+            'bins': sorted(d['bins'], reverse=True),   # 2, 1  (FIX: d['bins'] is already a set of ints)
+            'racks': d['racks'],
+        }
+
+    total_racks = len(all_racks)
+    occupied_count = sum(1 for v in rack_lookup.values() if v['is_occupied'])
+    empty_count = total_racks - occupied_count
+
+    return render_template('rack_status.html',
+                           aisle_data=result,
+                           rack_lookup=rack_lookup,
+                           total_racks=total_racks,
+                           occupied_count=occupied_count,
+                           empty_count=empty_count)
+
+# Add this route to app.py
+
+@app.route('/print-empty-racks')
+@login_required
+def print_empty_racks():
+    all_racks = Racking.query.order_by(Racking.aisle, Racking.level, Racking.position).all()
+
+    # Get occupied racking numbers
+    occupied_racking_numbers = {
+        r[0] for r in db.session.query(Stock.racking_number)
+        .filter(Stock.quantity > 0).distinct().all()
+    }
+
+    # Group empty racks by aisle
+    from collections import defaultdict
+    empty_by_aisle = defaultdict(list)
+
+    for rack in all_racks:
+        if rack.racking_number not in occupied_racking_numbers:
+            empty_by_aisle[rack.aisle].append(rack.racking_number)
+
+    # Sort aisles and racks
+    empty_by_aisle = dict(sorted(empty_by_aisle.items()))
+
+    total_empty = sum(len(v) for v in empty_by_aisle.values())
+    generated_at = datetime.now().strftime('%Y-%m-%d %H:%M')
+
+    return render_template('print_empty_racks.html',
+                           empty_by_aisle=empty_by_aisle,
+                           total_empty=total_empty,
+                           generated_at=generated_at)
 
 @app.route('/download-picklist/<dn_number>', methods=['GET'])
 def download_picklist(dn_number):
@@ -2362,6 +2455,24 @@ def download_picklist(dn_number):
     else:
         return "Picklist not found", 404
 
+
+@app.route('/print-order-view/<int:order_id>')
+@login_required
+def print_order_view(order_id):
+    """Render printable HTML view of order"""
+
+    order = Order.query.get_or_404(order_id)
+
+    unique_skus = {item.sku.material_number for item in order.items}
+    total_sku = len(unique_skus)
+    total_quantity = sum(item.quantity for item in order.items)
+    total_weight = sum(item.quantity * item.sku.weight for item in order.items)
+
+    return render_template('print_order_view.html',
+                           order=order,
+                           total_sku=total_sku,
+                           total_quantity=total_quantity,
+                           total_weight=total_weight)
 
 @app.route('/cancel-order/<int:order_id>', methods=['GET', 'POST'])
 @login_required
