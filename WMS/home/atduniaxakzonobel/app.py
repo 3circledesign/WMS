@@ -958,14 +958,13 @@ def adjust_stock(stock_id):
 @app.route('/daily-rack-count')
 @login_required
 def daily_rack_count():
-    """Display daily rack count data table with automatic filling of missing days (up to today only)"""
+    """Display daily rack count data with utilization % and estimated volume"""
     from datetime import timedelta
     import pytz
-    
-    # Handle month selection
+    import re
+ 
     selected_month_str = request.args.get('month', default=None)
-    
-    # Default to current month if no month is selected
+ 
     if selected_month_str:
         try:
             selected_month = datetime.strptime(selected_month_str, '%Y-%m')
@@ -973,23 +972,19 @@ def daily_rack_count():
             selected_month = datetime.now()
     else:
         selected_month = datetime.now()
-    
-    # Get days in month
+ 
     days_in_month = monthrange(selected_month.year, selected_month.month)[1]
-    
-    # Get today's date (in local timezone)
     today = datetime.now(pytz.timezone('Asia/Kuala_Lumpur')).date()
-    
+ 
     # Get all daily rack count records for the selected month
     daily_rack_counts = (
         db.session.query(DailyRackCount)
         .filter(extract('month', DailyRackCount.date) == selected_month.month)
         .filter(extract('year', DailyRackCount.date) == selected_month.year)
-        .order_by(DailyRackCount.date.asc())  # Oldest first
+        .order_by(DailyRackCount.date.asc())
         .all()
     )
-    
-    # Convert to dictionary for easy lookup
+ 
     existing_data = {}
     for record in daily_rack_counts:
         existing_data[record.date] = {
@@ -997,85 +992,102 @@ def daily_rack_count():
             'occupied_racks': record.occupied_racks,
             'is_auto_generated': False
         }
-    
-    # Create complete list for the month (UP TO TODAY ONLY)
+ 
+    # Build complete list up to today only
     complete_records = []
     first_day = datetime(selected_month.year, selected_month.month, 1).date()
-    last_day = datetime(selected_month.year, selected_month.month, days_in_month).date()
-    
-    # IMPORTANT: Don't go beyond today's date
+    last_day  = datetime(selected_month.year, selected_month.month, days_in_month).date()
     if last_day > today:
         last_day = today
-    
-    current_date = first_day
-    previous_value = None  # Track the previous day's value for auto-fill
-    
+ 
+    current_date   = first_day
+    previous_value = None
+ 
     while current_date <= last_day:
         if current_date in existing_data:
-            # Day exists in database - use actual data
             complete_records.append(existing_data[current_date])
             previous_value = existing_data[current_date]['occupied_racks']
         else:
-            # Day is missing - auto-fill from previous day (only if not future)
             if previous_value is not None:
                 complete_records.append({
                     'date': current_date,
                     'occupied_racks': previous_value,
                     'is_auto_generated': True
                 })
-            # If no previous value exists, skip this day (can't auto-fill first day)
-        
         current_date += timedelta(days=1)
-    
-    # Calculate statistics
-    if complete_records:
-        max_occupied = max(r['occupied_racks'] for r in complete_records)
-        min_occupied = min(r['occupied_racks'] for r in complete_records)
-        total_records = len(complete_records)
-        
-        # Count manual vs auto-generated
-        manual_records = sum(1 for r in complete_records if not r['is_auto_generated'])
-        auto_records = sum(1 for r in complete_records if r['is_auto_generated'])
-        
-        # Calculate sum and average
-        total_occupied = sum(r['occupied_racks'] for r in complete_records)
-        monthly_average = total_occupied / days_in_month if days_in_month else 0
-    else:
-        max_occupied = 0
-        min_occupied = 0
-        total_records = 0
-        manual_records = 0
-        auto_records = 0
-        total_occupied = 0
-        monthly_average = 0
-    
-    # Get total racks for percentage calculation
+ 
+    # Total racks for utilization %
     total_racks = Racking.query.count()
-    
+ 
+    # ── Estimated Volume from CURRENT stock ───────────────────────────────
+    # pack_size.size is a string like "20L", "5L", "1.43L", "20lt"
+    # We extract the numeric part and multiply by stock quantity
+    all_stocks = Stock.query.filter(Stock.quantity > 0).all()
+ 
+    total_volume_litres = 0.0
+    for stock in all_stocks:
+        try:
+            if stock.sku and stock.sku.pack_size and stock.sku.pack_size.size:
+                size_str = str(stock.sku.pack_size.size)
+                # Extract first number from e.g. "20L", "5L", "1.43L", "20lt", "20"
+                match = re.search(r'\d+\.?\d*', size_str)
+                if match:
+                    litres = float(match.group())
+                    total_volume_litres += stock.quantity * litres
+        except Exception:
+            pass
+ 
+    total_volume_litres = round(total_volume_litres, 2)
+ 
+    # ── Statistics ────────────────────────────────────────────────────────
+    if complete_records:
+        max_occupied    = max(r['occupied_racks'] for r in complete_records)
+        min_occupied    = min(r['occupied_racks'] for r in complete_records)
+        total_records   = len(complete_records)
+        manual_records  = sum(1 for r in complete_records if not r['is_auto_generated'])
+        auto_records    = sum(1 for r in complete_records if r['is_auto_generated'])
+        total_occupied  = sum(r['occupied_racks'] for r in complete_records)
+        monthly_average = total_occupied / days_in_month if days_in_month else 0
+ 
+        # Average utilization % across all recorded days
+        if total_racks > 0:
+            avg_utilization = round(
+                sum((r['occupied_racks'] / total_racks) * 100 for r in complete_records)
+                / len(complete_records), 1
+            )
+        else:
+            avg_utilization = 0.0
+    else:
+        max_occupied = min_occupied = total_records = manual_records = 0
+        auto_records = total_occupied = 0
+        monthly_average = avg_utilization = 0.0
+ 
     return render_template(
         'daily_rack_count.html',
-        daily_rack_counts=complete_records,  # Complete list with auto-filled days (up to today)
+        daily_rack_counts=complete_records,
         selected_month=selected_month_str or selected_month.strftime('%Y-%m'),
         max_occupied=max_occupied,
         min_occupied=min_occupied,
         total_daily_records=total_records,
-        manual_records=manual_records,  # Count of manual records
-        auto_records=auto_records,  # Count of auto-generated records
+        manual_records=manual_records,
+        auto_records=auto_records,
         days_in_month=days_in_month,
         monthly_average=monthly_average,
         total_occupied=total_occupied,
-        total_racks=total_racks
+        total_racks=total_racks,
+        avg_utilization=avg_utilization,
+        total_volume_litres=total_volume_litres,
     )
+
+# REPLACE your existing daily_orders route in app.py with this:
 
 @app.route('/daily-orders')
 @login_required
 def daily_orders():
-    """Display daily order creation count"""
-    
-    # Handle month selection
+    """Display daily order creation count with weight summary"""
+
     selected_month_str = request.args.get('month', default=None)
-    
-    # Default to current month if no month is selected
+
     if selected_month_str:
         try:
             selected_month = datetime.strptime(selected_month_str, '%Y-%m')
@@ -1083,11 +1095,9 @@ def daily_orders():
             selected_month = datetime.now()
     else:
         selected_month = datetime.now()
-    
-    # Get days in month
+
     days_in_month = monthrange(selected_month.year, selected_month.month)[1]
-    
-    # Get all orders for the selected month (exclude cancelled and non-numeric DN numbers)
+
     orders = (
         db.session.query(Order)
         .filter(extract('month', Order.created_at) == selected_month.month)
@@ -1095,46 +1105,55 @@ def daily_orders():
         .filter(Order.status != 'cancelled')
         .all()
     )
-    
-    # Filter out non-numeric dn_numbers and group by date
+
     from collections import defaultdict
-    daily_counts = defaultdict(int)
-    
+
+    # Build daily_data: date -> { count, weight }
+    daily_data = defaultdict(lambda: {'count': 0, 'weight': 0.0})
+
     for order in orders:
-        # Check if dn_number is numeric (can be pure digits or contains digits)
         if order.dn_number and order.dn_number.strip().isdigit():
-            # Get the date (without time)
             order_date = order.created_at.date()
-            daily_counts[order_date] += 1
-    
-    # Convert to sorted list of tuples (date, count)
-    daily_order_data = sorted(daily_counts.items(), key=lambda x: x[0])
-    
-    # Calculate statistics
+            daily_data[order_date]['count'] += 1
+
+            # Sum weight from all order items
+            for item in order.items:
+                try:
+                    daily_data[order_date]['weight'] += item.quantity * item.sku.weight
+                except Exception:
+                    pass
+
+    # Sort into list of (date, count, weight)
+    daily_order_data = sorted(
+        [(date, v['count'], round(v['weight'], 2)) for date, v in daily_data.items()],
+        key=lambda x: x[0]
+    )
+
     if daily_order_data:
-        total_orders = sum(count for date, count in daily_order_data)
-        max_orders = max(count for date, count in daily_order_data)
-        min_orders = min(count for date, count in daily_order_data)
+        total_orders           = sum(r[1] for r in daily_order_data)
+        total_weight           = round(sum(r[2] for r in daily_order_data), 2)
+        max_orders             = max(r[1] for r in daily_order_data)
+        min_orders             = min(r[1] for r in daily_order_data)
         total_days_with_orders = len(daily_order_data)
-        daily_average = total_orders / days_in_month if days_in_month else 0
+        daily_average          = total_orders / days_in_month if days_in_month else 0
     else:
-        total_orders = 0
-        max_orders = 0
-        min_orders = 0
-        total_days_with_orders = 0
+        total_orders = max_orders = min_orders = total_days_with_orders = 0
+        total_weight  = 0.0
         daily_average = 0
-    
+
     return render_template(
         'daily_orders.html',
         daily_order_data=daily_order_data,
         selected_month=selected_month_str or selected_month.strftime('%Y-%m'),
         total_orders=total_orders,
+        total_weight=total_weight,
         max_orders=max_orders,
         min_orders=min_orders,
         total_days_with_orders=total_days_with_orders,
         days_in_month=days_in_month,
         daily_average=daily_average
     )
+
 
 @app.route('/dashboard', methods=['GET'])
 @login_required
@@ -1951,7 +1970,7 @@ def get_sku_info():
         return jsonify({'error': 'SKU not found'}), 404
 
     # Get stock entries for the SKU
-    stock_entries = Stock.query.filter_by(sku_id=sku.id).all()
+    stock_entries = Stock.query.filter_by(sku_id=sku.id).filter(Stock.quantity > 0).all()
 
     if not stock_entries:
         return jsonify({'error': 'No stock available for this SKU'}), 404

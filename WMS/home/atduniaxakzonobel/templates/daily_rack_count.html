@@ -181,7 +181,7 @@
 
     <!-- Additional Stats Row -->
     <div class="row mb-4">
-        <div class="col-md-4">
+        <div class="col-md-3">
             <div class="card text-white bg-success stat-card">
                 <div class="card-body text-center">
                     <h6 class="card-subtitle mb-2">Highest</h6>
@@ -190,7 +190,7 @@
                 </div>
             </div>
         </div>
-        <div class="col-md-4">
+        <div class="col-md-3">
             <div class="card text-white bg-danger stat-card">
                 <div class="card-body text-center">
                     <h6 class="card-subtitle mb-2">Lowest</h6>
@@ -199,12 +199,21 @@
                 </div>
             </div>
         </div>
-        <div class="col-md-4">
+        <div class="col-md-3">
             <div class="card text-white bg-dark stat-card">
                 <div class="card-body text-center">
-                    <h6 class="card-subtitle mb-2">Data Coverage</h6>
-                    <h2 class="card-title mb-0">{{ ((manual_records / days_in_month) * 100)|round(1) }}%</h2>
-                    <small>days manually recorded</small>
+                    <h6 class="card-subtitle mb-2">Avg Utilization</h6>
+                    <h2 class="card-title mb-0">{{ avg_utilization }}%</h2>
+                    <small>avg rack usage this month</small>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card text-white bg-primary stat-card">
+                <div class="card-body text-center">
+                    <h6 class="card-subtitle mb-2">Est. Volume Stored</h6>
+                    <h2 class="card-title mb-0">{{ "{:,.0f}".format(total_volume_litres) }} L</h2>
+                    <small>current stock volume</small>
                 </div>
             </div>
         </div>
@@ -219,8 +228,8 @@
                     <th style="width: 15%;">Date</th>
                     <th style="width: 15%;">Day of Week</th>
                     <th style="width: 20%;" class="text-center">Occupied Racks</th>
-                    <th style="width: 25%;" class="text-center">Change from Previous</th>
-                    <th style="width: 25%;" class="text-center">% of Total Racks</th>
+                    <th style="width: 20%;" class="text-center">Change from Previous</th>
+                    <th style="width: 30%;" class="text-center">Utilization %</th>
                 </tr>
             </thead>
             <tbody>
@@ -255,20 +264,21 @@
                         </td>
                         <td class="text-center">
                             {% if total_racks > 0 %}
-                                {% set percentage = (record.occupied_racks / total_racks) * 100 %}
-                                <div class="progress" style="height: 25px;">
-                                    <div class="progress-bar 
-                                        {% if percentage < 30 %}bg-danger
-                                        {% elif percentage < 70 %}bg-warning
-                                        {% else %}bg-success
-                                        {% endif %}" 
-                                        role="progressbar" 
-                                        style="width: {{ percentage }}%;" 
-                                        aria-valuenow="{{ percentage }}" 
-                                        aria-valuemin="0" 
-                                        aria-valuemax="100">
-                                        <strong>{{ percentage|round(1) }}%</strong>
+                                {% set pct = ((record.occupied_racks / total_racks) * 100)|round(1) %}
+                                <div class="d-flex align-items-center gap-2">
+                                    <div class="progress flex-grow-1" style="height: 22px;">
+                                        <div class="progress-bar
+                                            {% if pct < 30 %}bg-danger
+                                            {% elif pct < 70 %}bg-warning
+                                            {% else %}bg-success
+                                            {% endif %}"
+                                            role="progressbar"
+                                            style="width: {{ pct }}%;"
+                                            aria-valuenow="{{ pct }}"
+                                            aria-valuemin="0" aria-valuemax="100">
+                                        </div>
                                     </div>
+                                    <span style="min-width:45px; font-weight:600;">{{ pct }}%</span>
                                 </div>
                             {% else %}
                                 <span class="text-muted">N/A</span>
@@ -296,9 +306,19 @@
     <div class="card mt-4">
         <div class="card-body">
             <h5 class="card-title">📊 Calculation Details</h5>
-            <p class="mb-1"><strong>Total Sum:</strong> {{ total_occupied }} rack-days</p>
-            <p class="mb-1"><strong>Days in Month:</strong> {{ days_in_month }} days</p>
-            <p class="mb-0"><strong>Monthly Average:</strong> {{ total_occupied }} ÷ {{ days_in_month }} = {{ monthly_average|round(2) }} racks/day</p>
+            <div class="row">
+                <div class="col-md-6">
+                    <p class="mb-1"><strong>Total Rack-Days:</strong> {{ total_occupied }}</p>
+                    <p class="mb-1"><strong>Days in Month:</strong> {{ days_in_month }}</p>
+                    <p class="mb-1"><strong>Monthly Avg Racks:</strong> {{ monthly_average|round(2) }} racks/day</p>
+                    <p class="mb-0"><strong>Avg Utilization:</strong> {{ avg_utilization }}% of warehouse capacity</p>
+                </div>
+                <div class="col-md-6">
+                    <p class="mb-1"><strong>Est. Volume Stored (Current):</strong> {{ "{:,.2f}".format(total_volume_litres) }} L</p>
+                    <p class="mb-1"><strong>How calculated:</strong> Sum of (Qty × Pack Size) per SKU</p>
+                    <p class="mb-0"><strong>Example:</strong> EGA236/20L × 5 pcs = 100 L</p>
+                </div>
+            </div>
         </div>
     </div>
     {% endif %}

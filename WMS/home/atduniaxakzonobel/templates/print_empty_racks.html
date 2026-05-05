@@ -129,26 +129,10 @@
         <button onclick="window.print()" class="btn btn-success d-inline-block ms-2">🖨️ Print</button>
     </div>
 
-    <!-- Summary Cards -->
-    <div class="row mt-2">
-        <div class="col-md-6">
-            <div class="card text-white bg-danger mb-3">
-                <div class="card-header">Total Empty Racks</div>
-                <div class="card-body"><h2 class="card-title">{{ total_empty }}</h2></div>
-            </div>
-        </div>
-        <div class="col-md-6">
-            <div class="card text-white bg-secondary mb-3">
-                <div class="card-header">Aisles Affected</div>
-                <div class="card-body"><h2 class="card-title">{{ empty_by_aisle|length }}</h2></div>
-            </div>
-        </div>
-    </div>
-
     <!-- Doc header (print only) -->
     <div style="display:none;" class="d-print-flex justify-content-between align-items-start border-bottom pb-2 mb-3">
         <div>
-            <strong style="font-size:13pt;">Empty Rack List</strong><br>
+            <strong style="font-size:8pt;">Empty Rack List</strong><br>
             <small>A.T. Dunia Logistics — WMS</small>
         </div>
         <div style="text-align:right; font-size:8.5pt; color:#555;">
