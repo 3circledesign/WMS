@@ -160,6 +160,8 @@ def export_stocks_excel():
         print(f"Error occurred: {str(e)}")
         return "Error exporting data", 500
 
+# REPLACE your existing submit-stock route in app.py with this:
+
 @app.route('/submit-stock', methods=['POST'])
 @login_required
 def submit_stock():
@@ -168,6 +170,60 @@ def submit_stock():
     if not stock_list or len(stock_list) == 0:
         return jsonify({'error': 'No stock data provided'}), 400
 
+    # Special racks that skip capacity checks
+    special_bays = {"Disposal", "Damage", "Tinter", "Floor", "Chrome Room"}
+
+    # ── PRE-FLIGHT CAPACITY CHECK (before touching the DB) ────────────────
+    # Group all incoming lines by racking_number to get total incoming per rack
+    from collections import defaultdict
+    incoming_by_rack = defaultdict(int)
+    for stock_data in stock_list:
+        racking_number = stock_data.get('racking_number', '')
+        quantity = int(stock_data.get('quantity', 0))
+        if racking_number and quantity > 0:
+            incoming_by_rack[racking_number] += quantity
+
+    for racking_number, total_incoming in incoming_by_rack.items():
+        if racking_number in special_bays:
+            continue
+
+        # Get current DB quantity in this rack
+        current_stocks = Stock.query.filter_by(racking_number=racking_number).all()
+        current_qty = sum(s.quantity for s in current_stocks)
+
+        # Get max_capacity from the FIRST incoming SKU for this rack
+        # (all items in same rack should share same pack size group)
+        max_capacity = None
+        for stock_data in stock_list:
+            if stock_data.get('racking_number') != racking_number:
+                continue
+            material_number = stock_data.get('material_number', '')
+            sku = SKU.query.filter_by(material_number=material_number).first()
+            if sku and sku.pack_size and sku.pack_size.max_capacity:
+                try:
+                    max_capacity = int(sku.pack_size.max_capacity)
+                    break
+                except Exception:
+                    pass
+
+        if max_capacity is None:
+            # No pack size configured — skip capacity check for this rack
+            continue
+
+        total_after = current_qty + total_incoming
+        if total_after > max_capacity:
+            return jsonify({
+                'error': (
+                    f'Capacity exceeded for rack {racking_number}!\n'
+                    f'Max capacity : {max_capacity}\n'
+                    f'Currently in rack : {current_qty}\n'
+                    f'You are trying to add : {total_incoming}\n'
+                    f'Total would be : {total_after}\n\n'
+                    f'GR has been BLOCKED. Please reduce quantity or choose a different rack.'
+                )
+            }), 400
+
+    # ── ALL RACKS PASS — now commit ───────────────────────────────────────
     for stock_data in stock_list:
         material_number = stock_data.get('material_number')
         quantity = stock_data.get('quantity')
@@ -176,13 +232,10 @@ def submit_stock():
         racking_number = stock_data.get('racking_number')
         remarks = stock_data.get('remarks')
 
-        # Find the SKU by material number
         sku = SKU.query.filter_by(material_number=material_number).first()
-
         if not sku:
             return jsonify({'error': f'SKU with material number {material_number} not found'}), 404
 
-        # Check for existing stock with the same attributes
         existing_stock = Stock.query.filter_by(
             sku_id=sku.id,
             batch_number=batch_number,
@@ -192,19 +245,15 @@ def submit_stock():
         ).first()
 
         if existing_stock:
-            # Update the existing stock quantity
             existing_stock.quantity += quantity
-
-            # Log the change in the stock history
             stock_history = StockHistory(
                 stock_id=existing_stock.id,
-                change_type='GR',  # Goods Receiving
-                quantity=quantity,  # Log the added quantity
-                username = current_user.username
+                change_type='GR',
+                quantity=quantity,
+                username=current_user.username
             )
             db.session.add(stock_history)
         else:
-            # Create a new Stock entry
             new_stock = Stock(
                 sku_id=sku.id,
                 quantity=quantity,
@@ -213,24 +262,18 @@ def submit_stock():
                 racking_number=racking_number,
                 remarks=remarks
             )
-
-            # Add the new stock to the session
             db.session.add(new_stock)
-            db.session.flush()  # Flush to get the new_stock.id
+            db.session.flush()
 
-            # Create a StockHistory entry for this stock
             stock_history = StockHistory(
-                stock_id=new_stock.id,  # Use the new stock's ID
-                change_type='GR',  # Goods Receiving
+                stock_id=new_stock.id,
+                change_type='GR',
                 quantity=quantity,
-                username=current_user.username # Log the added quantity
+                username=current_user.username
             )
-
-            # Add the stock history to the session
             db.session.add(stock_history)
 
-    db.session.commit()  # Commit all stock entries and history to the database
-
+    db.session.commit()
     return jsonify({'message': 'Stock items submitted successfully!'}), 200
 
 @app.route('/save-stock/<int:stock_id>', methods=['POST'])
@@ -671,23 +714,23 @@ def check_racking_capacity():
     warning_msg = None
 
     if current_items:
-        # If rack already has stock, try to get capacity from existing items
-        caps = []
-        for s in current_items:
-            sku = SKU.query.get(s.sku_id)
-            if sku and getattr(sku, 'pack_size', None) and getattr(sku.pack_size, 'max_capacity', None) is not None:
-                try:
-                    caps.append(int(sku.pack_size.max_capacity))
-                except Exception:
-                    pass
         if incoming_cap is not None:
-            caps.append(incoming_cap)
-
-        if caps:
-            max_capacity = min(caps)  # tightest rule wins
+            # Always use the incoming SKU's own pack size capacity
+            max_capacity = incoming_cap
         else:
-            # No pack sizes configured - allow but warn
-            warning_msg = f'Capacity check skipped for {racking_number}. No pack sizes configured for items in this rack.'
+            # Incoming SKU has no pack size — fall back to existing items
+            caps = []
+            for s in current_items:
+                sku = SKU.query.get(s.sku_id)
+                if sku and getattr(sku, 'pack_size', None) and getattr(sku.pack_size, 'max_capacity', None) is not None:
+                    try:
+                        caps.append(int(sku.pack_size.max_capacity))
+                    except Exception:
+                        pass
+            if caps:
+                max_capacity = min(caps)
+            else:
+                warning_msg = f'Capacity check skipped for {racking_number}. No pack sizes configured.'
     else:
         # Rack is empty
         if incoming_cap is not None:
@@ -958,10 +1001,8 @@ def adjust_stock(stock_id):
 @app.route('/daily-rack-count')
 @login_required
 def daily_rack_count():
-    """Display daily rack count data with utilization % and estimated volume"""
     from datetime import timedelta
     import pytz
-    import re
  
     selected_month_str = request.args.get('month', default=None)
  
@@ -976,8 +1017,8 @@ def daily_rack_count():
     days_in_month = monthrange(selected_month.year, selected_month.month)[1]
     today = datetime.now(pytz.timezone('Asia/Kuala_Lumpur')).date()
  
-    # Get all daily rack count records for the selected month
-    daily_rack_counts = (
+    # Get all records for selected month
+    monthly_records = (
         db.session.query(DailyRackCount)
         .filter(extract('month', DailyRackCount.date) == selected_month.month)
         .filter(extract('year', DailyRackCount.date) == selected_month.year)
@@ -985,28 +1026,45 @@ def daily_rack_count():
         .all()
     )
  
-    existing_data = {}
-    for record in daily_rack_counts:
-        existing_data[record.date] = {
-            'date': record.date,
-            'occupied_racks': record.occupied_racks,
-            'is_auto_generated': False
-        }
+    existing_data = {r.date: r.occupied_racks for r in monthly_records}
  
-    # Build complete list up to today only
+    # If the month has no early entries, seed from last known entry
+    # before this month (so we can carry forward across month boundaries)
+    first_day_of_month = datetime(
+        selected_month.year, selected_month.month, 1
+    ).date()
+ 
+    seed_value = None
+    if first_day_of_month not in existing_data:
+        prev_entry = (
+            DailyRackCount.query
+            .filter(DailyRackCount.date < first_day_of_month)
+            .order_by(DailyRackCount.date.desc())
+            .first()
+        )
+        if prev_entry:
+            seed_value = prev_entry.occupied_racks
+ 
+    # Build complete record list for the month
     complete_records = []
-    first_day = datetime(selected_month.year, selected_month.month, 1).date()
-    last_day  = datetime(selected_month.year, selected_month.month, days_in_month).date()
+    first_day = first_day_of_month
+    last_day  = datetime(
+        selected_month.year, selected_month.month, days_in_month
+    ).date()
     if last_day > today:
         last_day = today
  
     current_date   = first_day
-    previous_value = None
+    previous_value = seed_value   # seeded from previous month if needed
  
     while current_date <= last_day:
         if current_date in existing_data:
-            complete_records.append(existing_data[current_date])
-            previous_value = existing_data[current_date]['occupied_racks']
+            previous_value = existing_data[current_date]
+            complete_records.append({
+                'date': current_date,
+                'occupied_racks': previous_value,
+                'is_auto_generated': False
+            })
         else:
             if previous_value is not None:
                 complete_records.append({
@@ -1016,30 +1074,23 @@ def daily_rack_count():
                 })
         current_date += timedelta(days=1)
  
-    # Total racks for utilization %
     total_racks = Racking.query.count()
  
-    # ── Estimated Volume from CURRENT stock ───────────────────────────────
-    # pack_size.size is a string like "20L", "5L", "1.43L", "20lt"
-    # We extract the numeric part and multiply by stock quantity
+    # Volume calculation
+    import re
     all_stocks = Stock.query.filter(Stock.quantity > 0).all()
- 
     total_volume_litres = 0.0
     for stock in all_stocks:
         try:
             if stock.sku and stock.sku.pack_size and stock.sku.pack_size.size:
-                size_str = str(stock.sku.pack_size.size)
-                # Extract first number from e.g. "20L", "5L", "1.43L", "20lt", "20"
-                match = re.search(r'\d+\.?\d*', size_str)
-                if match:
-                    litres = float(match.group())
-                    total_volume_litres += stock.quantity * litres
+                m = re.search(r'\d+\.?\d*', str(stock.sku.pack_size.size))
+                if m:
+                    total_volume_litres += stock.quantity * float(m.group())
         except Exception:
             pass
- 
     total_volume_litres = round(total_volume_litres, 2)
  
-    # ── Statistics ────────────────────────────────────────────────────────
+    # Statistics
     if complete_records:
         max_occupied    = max(r['occupied_racks'] for r in complete_records)
         min_occupied    = min(r['occupied_racks'] for r in complete_records)
@@ -1048,15 +1099,10 @@ def daily_rack_count():
         auto_records    = sum(1 for r in complete_records if r['is_auto_generated'])
         total_occupied  = sum(r['occupied_racks'] for r in complete_records)
         monthly_average = total_occupied / days_in_month if days_in_month else 0
- 
-        # Average utilization % across all recorded days
-        if total_racks > 0:
-            avg_utilization = round(
-                sum((r['occupied_racks'] / total_racks) * 100 for r in complete_records)
-                / len(complete_records), 1
-            )
-        else:
-            avg_utilization = 0.0
+        avg_utilization = round(
+            sum((r['occupied_racks'] / total_racks) * 100 for r in complete_records)
+            / len(complete_records), 1
+        ) if total_racks > 0 else 0.0
     else:
         max_occupied = min_occupied = total_records = manual_records = 0
         auto_records = total_occupied = 0
@@ -2774,35 +2820,95 @@ def delete_pack_size(pack_id):
     flash('Pack size deleted successfully!', 'success')
     return redirect(url_for('add_sku_html'))
 
-@app.route('/update-daily-rack-count', methods=['GET'])
+@app.route('/update-daily-rack-count')
 @login_required
 def update_daily_rack_count():
-    # Check if the user is an admin to allow them to update
     if not current_user.is_admin:
         flash('You are not authorized to perform this action.', 'danger')
         return redirect(url_for('dashboard'))
-
+ 
+    from datetime import timedelta
+ 
     today = datetime.now(pytz.timezone('Asia/Kuala_Lumpur')).date()
-    existing_entry = DailyRackCount.query.filter_by(date=today).first()
-
-    if not existing_entry:
-        # Query for the current occupied racks count
-        # FIXED: Added .filter(Stock.quantity > 0) to exclude zero-quantity racks
-        occupied_racks = (
-            db.session.query(Stock.racking_number)
-            .filter(Stock.quantity > 0)  # ← ADDED THIS LINE!
-            .distinct()
-            .count()
-        )
-
-        # Insert a new record for today's occupied rack count
-        new_entry = DailyRackCount(date=today, occupied_racks=occupied_racks)
-        db.session.add(new_entry)
-        db.session.commit()
-        flash('Daily rack count has been successfully updated!', 'success')
+ 
+    # Current live occupied rack count
+    occupied_racks_today = (
+        db.session.query(Stock.racking_number)
+        .filter(Stock.quantity > 0)
+        .distinct()
+        .count()
+    )
+ 
+    # ── COMPREHENSIVE BACKFILL ────────────────────────────────────────────
+    # Scan ALL gaps from the very first DB entry up to today
+    # This avoids timezone mismatch issues with the login route
+ 
+    # Get all existing dates in one query (efficient)
+    all_entries = (
+        DailyRackCount.query
+        .order_by(DailyRackCount.date.asc())
+        .all()
+    )
+ 
+    backfilled_count = 0
+ 
+    if all_entries:
+        # Build a dict of date → occupied_racks for fast lookup
+        existing = {e.date: e.occupied_racks for e in all_entries}
+ 
+        # Start from the first known entry date
+        scan_date  = all_entries[0].date
+        fill_value = all_entries[0].occupied_racks
+ 
+        while scan_date < today:
+            if scan_date in existing:
+                # Real entry exists — update carry-forward value
+                fill_value = existing[scan_date]
+            else:
+                # Gap found — backfill with carry-forward value
+                db.session.add(DailyRackCount(
+                    date=scan_date,
+                    occupied_racks=fill_value
+                ))
+                existing[scan_date] = fill_value  # track in memory too
+                backfilled_count += 1
+ 
+            scan_date += timedelta(days=1)
+ 
+    # ── Save today ────────────────────────────────────────────────────────
+    existing_today = DailyRackCount.query.filter_by(date=today).first()
+    if not existing_today:
+        db.session.add(DailyRackCount(
+            date=today,
+            occupied_racks=occupied_racks_today
+        ))
+        today_saved = True
     else:
-        flash('Daily rack count for today already exists.', 'info')
-
+        # Update today's count with latest live value
+        existing_today.occupied_racks = occupied_racks_today
+        today_saved = False
+ 
+    db.session.commit()
+ 
+    if today_saved:
+        if backfilled_count > 0:
+            flash(
+                f'Daily rack count updated! '
+                f'Also auto-filled {backfilled_count} missing day(s).',
+                'success'
+            )
+        else:
+            flash('Daily rack count updated successfully!', 'success')
+    else:
+        if backfilled_count > 0:
+            flash(
+                f'Today\'s count refreshed. '
+                f'Auto-filled {backfilled_count} missing day(s).',
+                'info'
+            )
+        else:
+            flash('Daily rack count refreshed.', 'info')
+ 
     return redirect(url_for('dashboard'))
 
 @app.route('/edit-order/<int:order_id>', methods=['GET'])
@@ -3065,30 +3171,25 @@ def toggle_order_status(order_id):
 @app.route('/cycle-count', methods=['GET'])
 @login_required
 def cycle_count():
-    """Print view for cycle count - grouped by racking/bay"""
     from datetime import datetime
 
     # Get filters
     selected_racking = request.args.get('racking_number', 'all')
     include_zero = request.args.get('include_zero', 'no')
+    sku_filter = request.args.get('sku_filter', '').strip()        # ← new
+    batch_filter = request.args.get('batch_filter', '').strip()    # ← new
 
     # Get all racking numbers
     all_rackings = Racking.query.order_by(Racking.racking_number).all()
 
-    # Build racking list with rack letters AND specific bays
+    # Build racking list
     racking_list = []
-
-    # Add rack letters (A, B, C, D, etc.)
     rack_letters = set()
     for r in all_rackings:
         rack_letter = r.racking_number.split('-')[0] if '-' in r.racking_number else r.racking_number[0]
         rack_letters.add(rack_letter)
-
-    # Add rack letters first
     for letter in sorted(rack_letters):
         racking_list.append(letter)
-
-    # Add specific bays
     for r in all_rackings:
         racking_list.append(r.racking_number)
 
@@ -3106,29 +3207,33 @@ def cycle_count():
 
     # Apply racking filter
     if selected_racking != 'all':
-        # If single letter (A, B, C), show all bays in that rack
         if len(selected_racking) == 1:
             query = query.filter(Stock.racking_number.like(f'{selected_racking}-%'))
         else:
-            # Specific bay
             query = query.filter(Stock.racking_number == selected_racking)
 
     # Apply zero stock filter
     if include_zero == 'no':
         query = query.filter(Stock.quantity > 0)
 
-    # Order by racking number, then material number
-    query = query.order_by(Stock.racking_number, SKU.material_number, Stock.batch_number)
+    # Apply SKU filter ← new
+    if sku_filter:
+        query = query.filter(SKU.material_number.ilike(f'%{sku_filter}%'))
 
+    # Apply batch filter ← new
+    if batch_filter:
+        query = query.filter(Stock.batch_number.ilike(f'%{batch_filter}%'))
+
+    # Order
+    query = query.order_by(Stock.racking_number, SKU.material_number, Stock.batch_number)
     stocks = query.all()
 
-    # Group by racking number (instead of material number)
+    # Group by racking number
     racking_stocks = {}
     for stock in stocks:
         rack_num = stock.racking_number
         if rack_num not in racking_stocks:
             racking_stocks[rack_num] = []
-
         racking_stocks[rack_num].append({
             'stock_id': stock.stock_id,
             'material_number': stock.material_number,
@@ -3141,10 +3246,12 @@ def cycle_count():
         })
 
     return render_template('cycle_count_print.html',
-                           racking_stocks=racking_stocks,  # Changed from sku_stocks
+                           racking_stocks=racking_stocks,
                            racking_list=racking_list,
                            selected_racking=selected_racking,
                            include_zero=include_zero,
+                           sku_filter=sku_filter,          # ← new
+                           batch_filter=batch_filter,      # ← new
                            count_date=datetime.now().strftime('%Y-%m-%d'),
                            total_stock_lines=len(stocks))
 
@@ -3358,17 +3465,17 @@ def search_sku_cycle_count():
     try:
         data = request.get_json()
         search_term = (data.get('search_term') or '').strip()
-        
+
         if not search_term:
             return jsonify({'results': []}), 200
-        
+
         # Search by material_number OR product_description (case-insensitive)
         # Join with Stock to get all SKUs that have stock entries
         skus = db.session.query(SKU).join(Stock).filter(
-            (SKU.material_number.like(f'%{search_term}%')) | 
+            (SKU.material_number.like(f'%{search_term}%')) |
             (SKU.product_description.like(f'%{search_term}%'))
         ).distinct().limit(10).all()
-        
+
         results = []
         for sku in skus:
             results.append({
@@ -3376,9 +3483,9 @@ def search_sku_cycle_count():
                 'product_description': sku.product_description,
                 'display': f"{sku.material_number} - {sku.product_description}"
             })
-        
+
         return jsonify({'results': results}), 200
-        
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -3568,44 +3675,111 @@ def bulk_transfer_racking():
                            stocks=stocks,
                            racking_numbers=racking_numbers)
 
+BULK_TRANSFER_MAX_LINES = 10 
 
 @app.route('/bulk-transfer-racking/execute', methods=['POST'])
 @login_required
 def execute_bulk_transfer():
-    """Execute bulk transfer of multiple stocks to one destination"""
-
+    """Execute bulk transfer of multiple stocks to one destination - WITH SAFETY CHECKS"""
+ 
     try:
         data = request.get_json()
-        transfers = data.get('transfers', [])  # List of {stock_id, quantity}
+        transfers = data.get('transfers', [])
         destination_racking = data.get('destination_racking')
-
+        force = data.get('force', False)   # frontend may pass force=true after warning
+ 
         if not transfers or not destination_racking:
             return jsonify({'error': 'Missing transfer data or destination'}), 400
-
+ 
+        # ── SAFETY 1: Line limit ─────────────────────────────────────────
+        if len(transfers) > BULK_TRANSFER_MAX_LINES:
+            return jsonify({
+                'error': f'Too many lines! Bulk transfer is limited to '
+                         f'{BULK_TRANSFER_MAX_LINES} stock lines per operation. '
+                         f'You selected {len(transfers)}. '
+                         f'Split into smaller transfers.'
+            }), 400
+ 
         # Validate destination racking exists
         dest_rack = Racking.query.filter_by(racking_number=destination_racking).first()
         if not dest_rack:
             return jsonify({'error': f'Destination racking {destination_racking} not found'}), 400
-
-        successful_transfers = []
-        failed_transfers = []
-
+ 
+        # ── SAFETY 2: Capacity check BEFORE moving anything ─────────────
+        # Current quantity at destination
+        dest_stocks = Stock.query.filter_by(racking_number=destination_racking).all()
+        current_dest_qty = sum(s.quantity for s in dest_stocks)
+ 
+        # Total incoming quantity
+        total_incoming = 0
+        incoming_caps = []   # capacities of incoming SKUs
+        pack_size_groups = set()
+ 
+        # Include existing dest stock pack groups
+        import re as _re
+        for s in dest_stocks:
+            if s.quantity > 0 and s.sku and s.sku.pack_size and s.sku.pack_size.size:
+                m = _re.search(r'\d+\.?\d*', str(s.sku.pack_size.size))
+                if m:
+                    pack_size_groups.add(int(float(m.group())))
+ 
         for transfer in transfers:
             stock_id = transfer.get('stock_id')
             quantity = int(transfer.get('quantity', 0))
-
             if quantity <= 0:
                 continue
-
-            # Get source stock
+            total_incoming += quantity
+ 
+            src = Stock.query.get(stock_id)
+            if src and src.sku and src.sku.pack_size:
+                if src.sku.pack_size.max_capacity:
+                    try:
+                        incoming_caps.append(int(src.sku.pack_size.max_capacity))
+                    except Exception:
+                        pass
+                if src.sku.pack_size.size:
+                    m = _re.search(r'\d+\.?\d*', str(src.sku.pack_size.size))
+                    if m:
+                        pack_size_groups.add(int(float(m.group())))
+ 
+        # Capacity = the incoming SKU's pack capacity (use max of incoming if mixed)
+        if incoming_caps:
+            max_capacity = max(incoming_caps)
+            total_after = current_dest_qty + total_incoming
+            if total_after > max_capacity:
+                return jsonify({
+                    'error': f'CAPACITY EXCEEDED for {destination_racking}!\n'
+                             f'Max capacity: {max_capacity}\n'
+                             f'Currently in rack: {current_dest_qty}\n'
+                             f'Trying to add: {total_incoming}\n'
+                             f'Total would be: {total_after}\n\n'
+                             f'This transfer is BLOCKED to protect your warehouse data.'
+                }), 400
+ 
+        # ── SAFETY 3: Mixed pack size warning ────────────────────────────
+        if len(pack_size_groups) > 1 and not force:
+            return jsonify({
+                'warning': f'Mixed pack sizes detected: {sorted(pack_size_groups)}L in '
+                           f'{destination_racking}. Send force=true to proceed anyway.',
+                'requires_confirmation': True
+            }), 409
+ 
+        # ── Execute transfers (original logic) ───────────────────────────
+        successful_transfers = []
+        failed_transfers = []
+ 
+        for transfer in transfers:
+            stock_id = transfer.get('stock_id')
+            quantity = int(transfer.get('quantity', 0))
+ 
+            if quantity <= 0:
+                continue
+ 
             source_stock = Stock.query.get(stock_id)
             if not source_stock:
-                failed_transfers.append({
-                    'stock_id': stock_id,
-                    'reason': 'Stock not found'
-                })
+                failed_transfers.append({'stock_id': stock_id, 'reason': 'Stock not found'})
                 continue
-
+ 
             if source_stock.quantity < quantity:
                 failed_transfers.append({
                     'stock_id': stock_id,
@@ -3613,20 +3787,17 @@ def execute_bulk_transfer():
                     'reason': f'Insufficient quantity (available: {source_stock.quantity})'
                 })
                 continue
-
-            # Check if destination already has this exact stock (same SKU, batch, shipment)
+ 
             existing_dest = Stock.query.filter_by(
                 sku_id=source_stock.sku_id,
                 batch_number=source_stock.batch_number,
                 shipment_number=source_stock.shipment_number,
                 racking_number=destination_racking
             ).first()
-
+ 
             if existing_dest:
-                # Merge with existing stock
                 existing_dest.quantity += quantity
             else:
-                # Create new stock record at destination
                 new_stock = Stock(
                     sku_id=source_stock.sku_id,
                     batch_number=source_stock.batch_number,
@@ -3634,14 +3805,12 @@ def execute_bulk_transfer():
                     racking_number=destination_racking,
                     quantity=quantity,
                     remarks=source_stock.remarks,
-                    timestamp=datetime.now()  # ✅ FIXED
+                    timestamp=datetime.now()
                 )
                 db.session.add(new_stock)
-
-            # Reduce source quantity
+ 
             source_stock.quantity -= quantity
-
-            # Create stock history record
+ 
             history = StockHistory(
                 stock_id=source_stock.id,
                 change_type='bulk_transfer',
@@ -3651,7 +3820,7 @@ def execute_bulk_transfer():
                 remarks=f'Bulk transferred {quantity} units from {source_stock.racking_number} to {destination_racking}'
             )
             db.session.add(history)
-
+ 
             successful_transfers.append({
                 'material': source_stock.sku.material_number,
                 'batch': source_stock.batch_number,
@@ -3659,17 +3828,16 @@ def execute_bulk_transfer():
                 'from': source_stock.racking_number,
                 'to': destination_racking
             })
-
-        # Commit all changes
+ 
         db.session.commit()
-
+ 
         return jsonify({
             'success': True,
             'message': f'Successfully transferred {len(successful_transfers)} items',
             'successful': successful_transfers,
             'failed': failed_transfers
         })
-
+ 
     except Exception as e:
         db.session.rollback()
         return jsonify({'error': str(e)}), 500
